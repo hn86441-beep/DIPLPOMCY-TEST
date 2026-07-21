@@ -1,0 +1,1 @@
+# DIPLPOMCY-TEST
