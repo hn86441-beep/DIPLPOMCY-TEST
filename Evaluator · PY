@@ -1,0 +1,295 @@
+# -*- coding: utf-8 -*-
+"""
+evaluator.py
+============
+محرك تقييم ذكي لجودة الترجمة الدبلوماسية بثلاث لغات (عربي / إنجليزي / روسي).
+
+يعتمد على مزيج من:
+1) التشابه الدلالي/اللفظي (TF-IDF + Cosine Similarity) بين ترجمة المستخدم والنموذج المرجعي.
+2) تغطية المصطلحات الدبلوماسية الأساسية (Terminology Coverage) بالاستعانة بقاموس المصطلحات.
+3) مؤشر الاكتمال (نسبة الطول) لرصد الحذف أو الإضافة غير المبررة.
+4) مؤشر السجل اللغوي الرسمي (Formality/Register) عبر كشف علامات الأسلوب الدبلوماسي الرسمي
+   في كل لغة على حدة (عبارات الافتتاح، صيغ التبعية القانونية، ألقاب الاحترام...).
+5) (اختياري) تقييم متقدم عبر Claude API إذا أدخل المستخدم مفتاح API الخاص به،
+   لتحليل الدقة الدلالية والفروق الأسلوبية الدقيقة التي يصعب على القواعد اللغوية رصدها.
+
+النتيجة: تقرير تفصيلي (0-100) مع ملاحظات ثلاثية اللغة قابلة للعرض المباشر في Streamlit.
+"""
+
+import re
+import difflib
+from dataclasses import dataclass, field
+from typing import Optional
+
+import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+
+# ----------------------------------------------------------------------------
+# علامات السجل الرسمي (Register Markers) لكل لغة — مؤشرات على الأسلوب الدبلوماسي
+# ----------------------------------------------------------------------------
+FORMALITY_MARKERS = {
+    "ar": [
+        "بموجب", "وفقاً ل", "وفقا ل", "فخامة", "معالي", "سعادة", "يشرفني",
+        "أكدت", "أعربت", "شددت", "دعت", "التزام", "بالنيابة عن", "إثر",
+        "من جانبه", "الجانبين", "الطرفين", "في هذا السياق", "تجدر الإشارة",
+    ],
+    "en": [
+        "pursuant to", "in accordance with", "his excellency", "her excellency",
+        "on behalf of", "the parties", "reaffirmed", "expressed", "underscored",
+        "hereby", "with regard to", "in this context", "shall", "commitment",
+    ],
+    "ru": [
+        "в соответствии с", "стороны", "выразил", "подчеркнул", "подтвердил",
+        "от имени", "его превосходительство", "её превосходительство",
+        "в связи с", "настоящим", "обязательство", "в рамках",
+    ],
+}
+
+# كلمات تعبّر عن نبرة غير رسمية يُفترض عدم وجودها في نص دبلوماسي
+INFORMALITY_PENALTY_WORDS = {
+    "ar": ["يعني", "بصراحة", "حلو", "تمام", "اوكي", "أوكي"],
+    "en": ["gonna", "wanna", "kinda", "stuff", "guys", "ok", "okay"],
+    "ru": ["короче", "типа", "ладно", "окей", "клёво"],
+}
+
+
+@dataclass
+class EvaluationResult:
+    overall_score: float
+    similarity_score: float
+    terminology_score: float
+    completeness_score: float
+    formality_score: float
+    matched_terms: list = field(default_factory=list)
+    missing_terms: list = field(default_factory=list)
+    feedback_ar: str = ""
+    feedback_en: str = ""
+    feedback_ru: str = ""
+    diff_html: str = ""
+    grade_label_ar: str = ""
+
+
+def _normalize(text: str, lang: str) -> str:
+    """تطبيع النص: إزالة التشكيل العربي، توحيد المسافات، خفض الحالة للاتينية/الروسية."""
+    text = text.strip()
+    if lang == "ar":
+        # إزالة التشكيل (الحركات)
+        text = re.sub(r"[\u064B-\u0652\u0670\u0640]", "", text)
+    else:
+        text = text.lower()
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+def _extract_terms_for_text(text: str, lang: str, glossary_df) -> set:
+    """يستخرج مصطلحات القاموس الظاهرة فعلياً داخل نص معيّن."""
+    col = {"ar": "term_ar", "en": "term_en", "ru": "term_ru"}[lang]
+    norm_text = _normalize(text, lang)
+    found = set()
+    for term in glossary_df[col].dropna().unique():
+        norm_term = _normalize(str(term), lang)
+        if norm_term and norm_term in norm_text:
+            found.add(term)
+    return found
+
+
+def _similarity_score(user_text: str, reference_text: str, lang: str) -> float:
+    """تشابه TF-IDF / Cosine بين نص المستخدم والنموذج المرجعي (0-100)."""
+    a = _normalize(user_text, lang)
+    b = _normalize(reference_text, lang)
+    if not a or not b:
+        return 0.0
+    try:
+        vectorizer = TfidfVectorizer(analyzer="word", token_pattern=r"(?u)\b\w+\b")
+        tfidf = vectorizer.fit_transform([a, b])
+        sim = cosine_similarity(tfidf[0:1], tfidf[1:2])[0][0]
+        return round(float(sim) * 100, 1)
+    except ValueError:
+        # نص قصير جداً أو بدون مفردات مشتركة كافية لبناء المصفوفة
+        seq_sim = difflib.SequenceMatcher(None, a, b).ratio()
+        return round(seq_sim * 100, 1)
+
+
+def _completeness_score(user_text: str, reference_text: str) -> float:
+    """نسبة اكتمال الترجمة استناداً لطول النص مقارنة بالنموذج (يعاقب الحذف الشديد أو الإطناب المفرط)."""
+    len_user = len(user_text.split())
+    len_ref = len(reference_text.split())
+    if len_ref == 0:
+        return 0.0
+    ratio = len_user / len_ref
+    # المثالي بين 0.85 و 1.25 من طول النموذج
+    if 0.85 <= ratio <= 1.25:
+        return 100.0
+    elif ratio < 0.85:
+        return round(max(0.0, ratio / 0.85) * 100, 1)
+    else:  # إطناب مفرط
+        excess = ratio - 1.25
+        return round(max(0.0, 100 - excess * 60), 1)
+
+
+def _formality_score(user_text: str, lang: str) -> float:
+    """يكشف وجود عبارات السجل الرسمي الدبلوماسي، ويعاقب العبارات العامية."""
+    norm = _normalize(user_text, lang)
+    markers = FORMALITY_MARKERS.get(lang, [])
+    informal = INFORMALITY_PENALTY_WORDS.get(lang, [])
+
+    hits = sum(1 for m in markers if _normalize(m, lang) in norm)
+    penalties = sum(1 for w in informal if _normalize(w, lang) in norm)
+
+    base = min(100.0, 55 + hits * 15)  # كل علامة رسمية تضيف نقاطاً
+    base -= penalties * 20
+    return round(max(0.0, min(100.0, base)), 1)
+
+
+def _terminology_score(user_text: str, reference_text: str, lang: str, glossary_df) -> tuple:
+    """يقارن مصطلحات القاموس الموجودة في نص المستخدم مقابل الموجودة في النموذج."""
+    ref_terms = _extract_terms_for_text(reference_text, lang, glossary_df)
+    user_terms = _extract_terms_for_text(user_text, lang, glossary_df)
+
+    if not ref_terms:
+        return 100.0, [], []  # النص المرجعي لا يحتوي مصطلحات قاموس متخصصة
+
+    matched = ref_terms & user_terms
+    missing = ref_terms - user_terms
+    score = round((len(matched) / len(ref_terms)) * 100, 1)
+    return score, sorted(matched), sorted(missing)
+
+
+def _make_diff_html(user_text: str, reference_text: str) -> str:
+    """يبني عرض فروقات مبسط (كلمات مضافة/محذوفة) بين النصين لعرضه في الواجهة."""
+    sm = difflib.SequenceMatcher(None, user_text.split(), reference_text.split())
+    parts = []
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        user_chunk = " ".join(user_text.split()[i1:i2])
+        ref_chunk = " ".join(reference_text.split()[j1:j2])
+        if tag == "equal":
+            parts.append(f"<span style='color:inherit'>{user_chunk}</span>")
+        elif tag == "replace":
+            parts.append(f"<span style='background:#ffe3e3;text-decoration:line-through'>{user_chunk}</span> "
+                          f"<span style='background:#d3f9d8'>{ref_chunk}</span>")
+        elif tag == "delete":
+            parts.append(f"<span style='background:#d3f9d8'>+ {ref_chunk}</span>")
+        elif tag == "insert":
+            parts.append(f"<span style='background:#ffe3e3;text-decoration:line-through'>{user_chunk}</span>")
+    return " ".join(parts)
+
+
+def _grade_label(score: float) -> str:
+    if score >= 90:
+        return "ممتاز — بمستوى مترجم دبلوماسي محترف 🏅"
+    elif score >= 75:
+        return "جيد جداً — قريب من الاحتراف مع ملاحظات بسيطة 👍"
+    elif score >= 60:
+        return "مقبول — يحتاج تحسين في الدقة الاصطلاحية 📘"
+    elif score >= 40:
+        return "ضعيف — راجع المفردات الدبلوماسية الأساسية 📖"
+    else:
+        return "يحتاج إعادة عمل جوهرية 🔄"
+
+
+def evaluate_translation(
+    user_text: str,
+    reference_text: str,
+    target_lang: str,
+    glossary_df,
+    weights: Optional[dict] = None,
+) -> EvaluationResult:
+    """
+    الدالة الرئيسية: تقيّم ترجمة المستخدم مقابل النموذج المرجعي بلغة الهدف target_lang
+    وتُعيد تقريراً شاملاً (EvaluationResult).
+
+    target_lang: 'ar' | 'en' | 'ru'
+    """
+    weights = weights or {"similarity": 0.40, "terminology": 0.30,
+                           "completeness": 0.15, "formality": 0.15}
+
+    similarity = _similarity_score(user_text, reference_text, target_lang)
+    completeness = _completeness_score(user_text, reference_text)
+    formality = _formality_score(user_text, target_lang)
+    terminology, matched, missing = _terminology_score(
+        user_text, reference_text, target_lang, glossary_df
+    )
+
+    overall = round(
+        similarity * weights["similarity"]
+        + terminology * weights["terminology"]
+        + completeness * weights["completeness"]
+        + formality * weights["formality"],
+        1,
+    )
+
+    diff_html = _make_diff_html(user_text, reference_text)
+
+    fb_ar = (
+        f"النتيجة الإجمالية: {overall}/100 — {_grade_label(overall)}\n"
+        f"• التشابه مع النموذج: {similarity}%\n"
+        f"• تغطية المصطلحات الدبلوماسية: {terminology}%"
+        + (f" (فاتتك: {', '.join(missing)})" if missing else " (تغطية كاملة ✅)")
+        + f"\n• اكتمال المحتوى: {completeness}%\n"
+        f"• مستوى الرسمية الدبلوماسية: {formality}%"
+    )
+    fb_en = (
+        f"Overall Score: {overall}/100\n"
+        f"• Semantic similarity to reference: {similarity}%\n"
+        f"• Diplomatic terminology coverage: {terminology}%"
+        + (f" (missing: {', '.join(missing)})" if missing else " (full coverage ✅)")
+        + f"\n• Content completeness: {completeness}%\n"
+        f"• Diplomatic register/formality: {formality}%"
+    )
+    fb_ru = (
+        f"Общий балл: {overall}/100\n"
+        f"• Смысловое сходство с эталоном: {similarity}%\n"
+        f"• Охват дипломатической терминологии: {terminology}%"
+        + (f" (пропущено: {', '.join(missing)})" if missing else " (полный охват ✅)")
+        + f"\n• Полнота содержания: {completeness}%\n"
+        f"• Дипломатический регистр/официальность: {formality}%"
+    )
+
+    return EvaluationResult(
+        overall_score=overall,
+        similarity_score=similarity,
+        terminology_score=terminology,
+        completeness_score=completeness,
+        formality_score=formality,
+        matched_terms=matched,
+        missing_terms=missing,
+        feedback_ar=fb_ar,
+        feedback_en=fb_en,
+        feedback_ru=fb_ru,
+        diff_html=diff_html,
+        grade_label_ar=_grade_label(overall),
+    )
+
+
+def evaluate_with_ai(user_text: str, reference_text: str, target_lang: str, api_key: str) -> str:
+    """
+    تقييم متقدم اختياري عبر Claude API (يتطلب من المستخدم إدخال مفتاحه الخاص في الشريط الجانبي).
+    يعيد تحليلاً نصياً غنياً حول الدقة الأسلوبية والدلالية.
+    """
+    import anthropic
+
+    client = anthropic.Anthropic(api_key=api_key)
+    lang_names = {"ar": "العربية", "en": "الإنجليزية", "ru": "الروسية"}
+
+    prompt = f"""أنت خبير ترجمة دبلوماسية محترف. قيّم ترجمة المتدرب التالية مقارنة بالنموذج المرجعي
+باللغة {lang_names.get(target_lang, target_lang)}.
+
+النموذج المرجعي:
+{reference_text}
+
+ترجمة المتدرب:
+{user_text}
+
+قدّم تقييماً موجزاً ومهنياً (لا يتجاوز 150 كلمة) يتضمن:
+1. نقاط القوة
+2. الأخطاء الاصطلاحية أو الأسلوبية إن وجدت
+3. توصية عملية واحدة للتحسين
+اكتب التقييم باللغة العربية."""
+
+    message = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=500,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return message.content[0].text
