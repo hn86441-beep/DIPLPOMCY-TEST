@@ -530,6 +530,11 @@ def evaluate_with_ai(user_text, reference_text, target_lang, api_key) -> str:
 # ============================================================================
 
 WIKI_LANG_MAP = {"ar": "ar", "en": "en", "ru": "ru"}
+# ويكيبيديا (وكذلك معظم الـ APIs العامة) تشترط وجود User-Agent وصفي، وإلا ترفض الطلب (403/406).
+HTTP_HEADERS = {
+    "User-Agent": "DiplomaticPrepApp/1.0 (Educational Streamlit App; contact: student-project@example.com)",
+    "Accept": "application/json",
+}
 
 
 def fetch_wikipedia_summary(term: str, lang: str) -> dict:
@@ -538,25 +543,69 @@ def fetch_wikipedia_summary(term: str, lang: str) -> dict:
         return {"error": "مكتبة requests غير متاحة على الخادم."}
     wiki_lang = WIKI_LANG_MAP.get(lang, "en")
     try:
-        search_url = f"https://{wiki_lang}.wikipedia.org/w/api.php"
-        params = {"action": "opensearch", "search": term, "limit": 1, "namespace": 0, "format": "json"}
-        r = requests.get(search_url, params=params, timeout=6)
+        search_url = f"https://{wiki_lang}.wikipedia.org/w/rest.php/v1/search/page"
+        params = {"q": term, "limit": 1}
+        r = requests.get(search_url, params=params, headers=HTTP_HEADERS, timeout=8)
         r.raise_for_status()
         data = r.json()
-        if not data or len(data) < 2 or not data[1]:
-            return {"error": f"لم يُعثر على صفحة مطابقة في ويكيبيديا ({wiki_lang})."}
-        page_title = data[1][0]
-        summary_url = f"https://{wiki_lang}.wikipedia.org/api/rest_v1/page/summary/{page_title}"
-        r2 = requests.get(summary_url, timeout=6)
+        pages = data.get("pages", [])
+        if not pages:
+            return {"error": f"لم يُعثر على صفحة مطابقة في ويكيبيديا ({wiki_lang}) لمصطلح «{term}»."}
+        page_key = pages[0].get("key") or pages[0].get("title", "").replace(" ", "_")
+
+        from urllib.parse import quote
+        encoded_title = quote(page_key, safe="")
+        summary_url = f"https://{wiki_lang}.wikipedia.org/api/rest_v1/page/summary/{encoded_title}"
+        r2 = requests.get(summary_url, headers=HTTP_HEADERS, timeout=8)
         r2.raise_for_status()
         sd = r2.json()
+
+        if sd.get("type") == "disambiguation":
+            return {"error": f"«{term}» له أكثر من معنى في ويكيبيديا — يرجى تحديد المصطلح بدقة أكبر."}
+
+        extract = sd.get("extract", "").strip()
+        if not extract:
+            return {"error": "لم يتم العثور على ملخص نصي لهذه الصفحة."}
+
         return {
-            "title": sd.get("title", page_title),
-            "extract": sd.get("extract", ""),
-            "url": sd.get("content_urls", {}).get("desktop", {}).get("page", f"https://{wiki_lang}.wikipedia.org/wiki/{page_title}"),
+            "title": sd.get("title", page_key),
+            "extract": extract,
+            "url": sd.get("content_urls", {}).get("desktop", {}).get("page", f"https://{wiki_lang}.wikipedia.org/wiki/{encoded_title}"),
         }
+    except requests.exceptions.Timeout:
+        return {"error": "انتهت مهلة الاتصال بويكيبيديا. حاول مرة أخرى."}
+    except requests.exceptions.HTTPError as e:
+        return {"error": f"تعذّر الوصول إلى ويكيبيديا (رمز الخطأ: {e.response.status_code if e.response is not None else '?'})."}
     except Exception as e:
         return {"error": f"تعذّر الوصول إلى ويكيبيديا حالياً ({e})."}
+
+
+def fetch_diplomatic_news(feed_url: str, limit: int = 6) -> list:
+    """يجلب ويحلل تغذية RSS رسمية (بدون الحاجة لمكتبات إضافية) ويعيد قائمة عناصر مختصرة."""
+    import xml.etree.ElementTree as ET
+    from html import unescape
+
+    if requests is None:
+        return [{"error": "مكتبة requests غير متاحة على الخادم."}]
+    try:
+        r = requests.get(feed_url, headers=HTTP_HEADERS, timeout=10)
+        r.raise_for_status()
+        root = ET.fromstring(r.content)
+        items = []
+        for item in root.findall(".//item")[:limit]:
+            title = (item.findtext("title") or "").strip()
+            link = (item.findtext("link") or "").strip()
+            pub_date = (item.findtext("pubDate") or "").strip()
+            desc_raw = item.findtext("description") or ""
+            desc_clean = re.sub(r"<[^>]+>", "", unescape(desc_raw)).strip()
+            if len(desc_clean) > 260:
+                desc_clean = desc_clean[:260].rsplit(" ", 1)[0] + "…"
+            items.append({"title": title, "link": link, "date": pub_date, "description": desc_clean})
+        return items
+    except requests.exceptions.Timeout:
+        return [{"error": "انتهت مهلة الاتصال بمصدر الأخبار."}]
+    except Exception as e:
+        return [{"error": f"تعذّر جلب الأخبار حالياً ({e})."}]
 
 
 # ============================================================================
@@ -607,32 +656,122 @@ def render_countdown_timer(minutes: int, key_suffix: str = ""):
 
 
 # ============================================================================
+# 8ب) مصادر الأخبار الدبلوماسية اليومية (تغذيات RSS رسمية موثوقة)
+# ============================================================================
+NEWS_SOURCES = {
+    "أخبار الأمم المتحدة (عربي)": "https://news.un.org/feed/subscribe/ar/news/all/rss.xml",
+    "RT بالعربية — دولي": "https://arabic.rt.com/rss/",
+}
+
+# ============================================================================
 # 9) إعداد الصفحة والتنسيق
 # ============================================================================
 st.set_page_config(page_title="بوابة الإعداد للسلك الدبلوماسي 🇷🇺", page_icon="🕊️",
                     layout="wide", initial_sidebar_state="expanded")
 
-st.markdown("""
+# ------------------------------------------------------------------
+# نظام السمة (Theme): وضع داكن/فاتح + حجم خط قابل للتحكم — يُحفظ في الجلسة
+# ------------------------------------------------------------------
+if "theme_mode" not in st.session_state:
+    st.session_state.theme_mode = "داكن"
+if "font_scale" not in st.session_state:
+    st.session_state.font_scale = "عادي"
+
+THEMES = {
+    "داكن": {
+        "bg1": "#0f1b2d", "bg2": "#13233a", "card": "#16273f", "card_border": "#d4af37",
+        "text": "#f3f6fa", "text_soft": "#c9d3e0", "heading": "#e9c568", "accent": "#d4af37",
+        "accent_text": "#0f1b2d", "input_bg": "#1c2f4a", "input_text": "#ffffff", "input_border": "#3a5170",
+    },
+    "فاتح": {
+        "bg1": "#f7f4ec", "bg2": "#fbfaf6", "card": "#ffffff", "card_border": "#b8912f",
+        "text": "#1c1c1c", "text_soft": "#3d3d3d", "heading": "#8a6d1f", "accent": "#b8912f",
+        "accent_text": "#ffffff", "input_bg": "#ffffff", "input_text": "#1c1c1c", "input_border": "#c9b77f",
+    },
+}
+FONT_SCALES = {"عادي": "16px", "كبير": "18px", "كبير جداً": "21px"}
+
+T = THEMES[st.session_state.theme_mode]
+BASE_FONT = FONT_SCALES[st.session_state.font_scale]
+
+st.markdown(f"""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&display=swap');
-html, body, [class*="css"] { font-family: 'Tajawal', sans-serif; direction: rtl; }
-.stApp { background: linear-gradient(180deg, #0f1b2d 0%, #13233a 100%); }
-h1, h2, h3 { color: #d4af37 !important; }
-p, li, span, label, div { color: #eef2f6; }
-.stTabs [data-baseweb="tab-list"] { gap: 6px; flex-wrap: wrap; }
-.stTabs [data-baseweb="tab"] { background-color: #16273f; border-radius: 8px 8px 0 0; padding: 10px 18px; color: #d4af37; font-weight: 700; }
-.stTabs [aria-selected="true"] { background-color: #d4af37 !important; color: #0f1b2d !important; }
-.metric-card { background: #16273f; border: 1px solid #d4af37; border-radius: 12px; padding: 16px; text-align: center; }
-.flashcard { background: linear-gradient(135deg, #1a2c47, #0f1b2d); border: 2px solid #d4af37; border-radius: 16px;
+@import url('https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;900&display=swap');
+
+html, body, [class*="css"] {{ font-family: 'Tajawal', sans-serif; direction: rtl; font-size: {BASE_FONT}; }}
+.stApp {{ background: linear-gradient(180deg, {T['bg1']} 0%, {T['bg2']} 100%); }}
+
+/* العناوين */
+h1, h2, h3, h4 {{ color: {T['heading']} !important; font-weight: 700 !important; }}
+
+/* النصوص العامة داخل حاويات Streamlit (بدون المساس بالحقول البيضاء للإدخال) */
+[data-testid="stMarkdownContainer"] p,
+[data-testid="stMarkdownContainer"] li,
+[data-testid="stMarkdownContainer"] span,
+[data-testid="stCaptionContainer"],
+[data-testid="stMetricLabel"],
+[data-testid="stWidgetLabel"] p,
+.stRadio label, .stCheckbox label, .stSelectbox label {{
+    color: {T['text']} !important;
+    font-size: {BASE_FONT} !important;
+    line-height: 1.9 !important;
+}}
+[data-testid="stCaptionContainer"] {{ color: {T['text_soft']} !important; opacity: 1 !important; }}
+[data-testid="stMetricValue"] {{ color: {T['heading']} !important; font-weight: 800 !important; }}
+
+/* حقول الإدخال: خلفية وتباين واضحان دوماً بصرف النظر عن السمة العامة */
+.stTextInput input, .stTextArea textarea, .stNumberInput input {{
+    background-color: {T['input_bg']} !important;
+    color: {T['input_text']} !important;
+    border: 1.5px solid {T['input_border']} !important;
+    font-size: {BASE_FONT} !important;
+    border-radius: 8px !important;
+}}
+.stSelectbox div[data-baseweb="select"] > div {{
+    background-color: {T['input_bg']} !important;
+    color: {T['input_text']} !important;
+    border: 1.5px solid {T['input_border']} !important;
+}}
+.stSelectbox div[data-baseweb="select"] * {{ color: {T['input_text']} !important; }}
+[data-baseweb="popover"] li {{ color: #1c1c1c !important; }}
+
+/* التبويبات */
+.stTabs [data-baseweb="tab-list"] {{ gap: 6px; flex-wrap: wrap; }}
+.stTabs [data-baseweb="tab"] {{ background-color: {T['card']}; border-radius: 8px 8px 0 0; padding: 10px 18px;
+                                  color: {T['heading']} !important; font-weight: 700; font-size: {BASE_FONT}; }}
+.stTabs [aria-selected="true"] {{ background-color: {T['accent']} !important; color: {T['accent_text']} !important; }}
+.stTabs [aria-selected="true"] p {{ color: {T['accent_text']} !important; }}
+
+/* البطاقات المخصصة */
+.metric-card {{ background: {T['card']}; border: 1px solid {T['card_border']}; border-radius: 12px; padding: 16px; text-align: center; }}
+.metric-card h1, .metric-card h2 {{ color: {T['heading']} !important; }}
+.metric-card p {{ color: {T['text']} !important; margin: 0; }}
+
+.flashcard {{ background: linear-gradient(135deg, {T['card']}, {T['bg1']}); border: 2px solid {T['card_border']}; border-radius: 16px;
              padding: 40px 20px; text-align: center; min-height: 160px; display: flex; flex-direction: column;
-             justify-content: center; box-shadow: 0 4px 14px rgba(0,0,0,0.4); }
-.badge { display:inline-block; background:#d4af37; color:#0f1b2d; padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight:700; margin: 2px; }
-.box-badge { display:inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight:700; margin-inline-start:6px; }
-.treaty-card { background: #16273f; border: 1px solid #d4af37; border-radius: 14px; padding: 18px 20px; margin-bottom: 14px; }
-.treaty-card h4 { margin-bottom: 4px; }
-.source-tag { display:inline-block; background:#0f1b2d; border:1px solid #d4af37; color:#d4af37 !important;
-              padding: 2px 10px; border-radius: 20px; font-size: 11px; margin-top: 6px; }
-.essay-box { background:#16273f; border-right: 4px solid #d4af37; border-radius: 8px; padding: 16px 18px; margin-bottom: 10px; }
+             justify-content: center; box-shadow: 0 4px 14px rgba(0,0,0,0.25); }}
+.flashcard h2 {{ color: {T['heading']} !important; }}
+.flashcard p {{ color: {T['text_soft']} !important; }}
+
+.badge {{ display:inline-block; background:{T['accent']}; color:{T['accent_text']} !important; padding: 3px 12px; border-radius: 20px; font-size: 13px; font-weight:700; margin: 2px; }}
+.box-badge {{ display:inline-block; padding: 3px 10px; border-radius: 10px; font-size: 12px; font-weight:700; margin-inline-start:6px; }}
+
+.treaty-card {{ background: {T['card']}; border: 1px solid {T['card_border']}; border-radius: 14px; padding: 18px 20px; margin-bottom: 14px; }}
+.treaty-card h4 {{ margin-bottom: 4px; color: {T['heading']} !important; }}
+.treaty-card p, .treaty-card li {{ color: {T['text']} !important; font-size: {BASE_FONT}; }}
+.treaty-card a {{ color: {T['accent']} !important; font-weight: 700; }}
+
+.source-tag {{ display:inline-block; background:{T['bg1']}; border:1px solid {T['accent']}; color:{T['accent']} !important;
+              padding: 3px 12px; border-radius: 20px; font-size: 12px; margin-top: 6px; }}
+
+.essay-box {{ background:{T['card']}; border-right: 4px solid {T['accent']}; border-radius: 8px; padding: 16px 18px; margin-bottom: 10px; }}
+.essay-box, .essay-box * {{ color: {T['text']} !important; font-size: {BASE_FONT}; line-height: 2 !important; }}
+
+.news-card {{ background: {T['card']}; border: 1px solid {T['card_border']}; border-radius: 12px; padding: 16px 18px; margin-bottom: 12px; }}
+.news-card h5 {{ color: {T['heading']} !important; margin-bottom: 6px; }}
+.news-card p {{ color: {T['text']} !important; }}
+.news-card .news-date {{ color: {T['text_soft']} !important; font-size: 12px; }}
+.news-card a {{ color: {T['accent']} !important; font-weight: 700; }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -679,6 +818,15 @@ BOX_LABELS = {1: "جديد", 2: "قيد التعلم", 3: "مألوف", 4: "شب
 with st.sidebar:
     st.markdown("## 🕊️ بوابة الدبلوماسي")
     st.markdown("**الإعداد لامتحان السلك الدبلوماسي**\nتركيز: اللغة الروسية 🇷🇺")
+    st.markdown("---")
+
+    st.markdown("### 🎨 إعدادات العرض")
+    new_theme = st.radio("السمة", ["داكن", "فاتح"], index=["داكن", "فاتح"].index(st.session_state.theme_mode), horizontal=True)
+    new_font = st.select_slider("حجم الخط", options=["عادي", "كبير", "كبير جداً"], value=st.session_state.font_scale)
+    if new_theme != st.session_state.theme_mode or new_font != st.session_state.font_scale:
+        st.session_state.theme_mode = new_theme
+        st.session_state.font_scale = new_font
+        st.rerun()
     st.markdown("---")
 
     st.markdown("### 🔥 سلسلة المذاكرة")
@@ -754,8 +902,9 @@ quote_pool = [
 ]
 st.info(random.choice(quote_pool))
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    ["📖 المعجم الثلاثي اللغة", "🎓 استوديو الترجمة والمقالات", "📝 بنك الأسئلة والاختبارات", "🏛️ مرجع المعاهدات والمنظمات", "🏆 لوحة التقدم"]
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+    ["📖 المعجم الثلاثي اللغة", "🎓 استوديو الترجمة والمقالات", "📝 بنك الأسئلة والاختبارات",
+     "🏛️ مرجع المعاهدات والمنظمات", "📰 الأخبار الدبلوماسية اليومية", "🏆 لوحة التقدم"]
 )
 
 # ============================================================================
@@ -1148,9 +1297,73 @@ with tab4:
         st.markdown(card, unsafe_allow_html=True)
 
 # ============================================================================
-# التبويب 5: لوحة التقدم
+# التبويب 5: الأخبار الدبلوماسية اليومية (مصدر خارجي حي + شرح)
 # ============================================================================
 with tab5:
+    st.subheader("📰 الأخبار الدبلوماسية اليومية")
+    st.caption("أخبار حيّة من مصادر رسمية موثوقة (RSS مباشر) — لتبقى مطّلعاً على آخر التطورات الدولية أثناء المذاكرة.")
+
+    news_col1, news_col2 = st.columns([2, 1])
+    with news_col1:
+        selected_source = st.selectbox("اختر المصدر:", list(NEWS_SOURCES.keys()))
+    with news_col2:
+        news_limit = st.slider("عدد الأخبار", 3, 10, 5)
+
+    refresh_news = st.button("🔄 تحديث الأخبار الآن")
+
+    news_cache_key = f"news_cache_{selected_source}"
+    if refresh_news or news_cache_key not in st.session_state:
+        with st.spinner("جارٍ جلب آخر الأخبار..."):
+            st.session_state[news_cache_key] = fetch_diplomatic_news(NEWS_SOURCES[selected_source], limit=news_limit)
+
+    news_items = st.session_state.get(news_cache_key, [])
+
+    if news_items and "error" in news_items[0]:
+        st.warning(news_items[0]["error"])
+        st.caption("💡 إذا استمرت المشكلة، قد يكون مصدر RSS قد غيّر رابطه — جرّب مصدراً آخر من القائمة.")
+    elif not news_items:
+        st.info("لا توجد أخبار لعرضها حالياً.")
+    else:
+        for idx, item in enumerate(news_items):
+            card = f"""
+            <div class="news-card">
+                <h5>📌 {item['title']}</h5>
+                <p class="news-date">🗓️ {item['date']}</p>
+                <p>{item['description']}</p>
+                <a href="{item['link']}" target="_blank">🔗 قراءة التفاصيل الكاملة من المصدر</a>
+            </div>
+            """
+            st.markdown(card, unsafe_allow_html=True)
+
+            if st.session_state.api_key:
+                if st.button(f"🧠 اشرح لي الدلالة الدبلوماسية لهذا الخبر", key=f"explain_news_{idx}"):
+                    with st.spinner("جارٍ التحليل..."):
+                        try:
+                            import anthropic
+                            client = anthropic.Anthropic(api_key=st.session_state.api_key)
+                            prompt = (
+                                "أنت أستاذ علاقات دولية يشرح لطالب يستعد لامتحان السلك الدبلوماسي. "
+                                f"اشرح بإيجاز (100-130 كلمة) الدلالة الدبلوماسية والسياسية لهذا الخبر، "
+                                "واذكر أي مصطلحات أو مفاهيم دبلوماسية ذات صلة قد تُطرح في الامتحان:\n\n"
+                                f"العنوان: {item['title']}\nالوصف: {item['description']}"
+                            )
+                            msg = client.messages.create(
+                                model="claude-sonnet-4-6", max_tokens=400,
+                                messages=[{"role": "user", "content": prompt}],
+                            )
+                            st.info(msg.content[0].text)
+                        except Exception as e:
+                            st.error(f"تعذّر توليد الشرح: {e}")
+            else:
+                st.caption("🔑 أضف مفتاح Claude API في الشريط الجانبي لتفعيل ميزة 'اشرح لي هذا الخبر' بالذكاء الاصطناعي.")
+            st.markdown("---")
+
+    st.info("💡 نصيحة: تابع هذا القسم يومياً — أسئلة الامتحان الشفوي غالباً ما تتطرق لأحداث دولية جارية.")
+
+# ============================================================================
+# التبويب 6: لوحة التقدم
+# ============================================================================
+with tab6:
     st.subheader("🏆 لوحة متابعة تقدمك")
 
     c1, c2, c3 = st.columns(3)
