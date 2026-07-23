@@ -529,6 +529,54 @@ def evaluate_with_ai(user_text, reference_text, target_lang, api_key) -> str:
 # 7) بحث حي في ويكيبيديا — مصدر معلومات خارجي (بلا مفتاح API)
 # ============================================================================
 
+def generate_ai_term_explanation(term: str, api_key: str) -> str:
+    """يولّد شرحاً دبلوماسياً غنياً وجديداً لأي مصطلح يطلبه المستخدم — غير مقتصر على المعجم الثابت."""
+    try:
+        import anthropic
+    except ImportError:
+        return "⚠️ مكتبة anthropic غير مثبّتة على الخادم."
+    client = anthropic.Anthropic(api_key=api_key)
+    prompt = f"""أنت خبير علاقات دولية ومترجم دبلوماسي محترف. اشرح المصطلح التالي: «{term}»
+
+قدّم إجابة منظمة بالتنسيق التالي بالضبط:
+**التعريف:** (شرح دقيق من 2-3 جمل بالعربية)
+**بالإنجليزية:** (الترجمة الإنجليزية الدقيقة)
+**بالروسية:** (الترجمة الروسية الدقيقة)
+**مثال استخدام دبلوماسي:** (جملة واحدة تستخدم المصطلح في سياق دبلوماسي رسمي)
+**مصطلحات ذات صلة:** (اذكر 3 مصطلحات مرتبطة قد تُطرح في نفس السياق)
+
+كن دقيقاً ومختصراً ومهنياً، وتجنب أي حشو."""
+    message = client.messages.create(model="claude-sonnet-4-6", max_tokens=600,
+                                      messages=[{"role": "user", "content": prompt}])
+    return message.content[0].text
+
+
+def generate_ai_questions(topic: str, api_key: str, n: int = 4) -> list:
+    """يولّد أسئلة اختيار من متعدد جديدة وحصرية حول موضوع يحدده المستخدم — محتوى متجدد لا يتكرر."""
+    import json as _json
+    try:
+        import anthropic
+    except ImportError:
+        return [{"error": "⚠️ مكتبة anthropic غير مثبّتة على الخادم."}]
+    client = anthropic.Anthropic(api_key=api_key)
+    prompt = f"""أنت خبير في إعداد امتحانات السلك الدبلوماسي. ولّد {n} أسئلة اختيار من متعدد جديدة وأصلية
+حول موضوع: «{topic}» (بمستوى امتحان السلك الدبلوماسي، متوسط إلى صعب).
+
+أعد الإجابة بصيغة JSON فقط، بلا أي نص إضافي قبله أو بعده، بالضبط بهذا الشكل:
+[
+  {{"question": "نص السؤال بالعربية", "option_a": "...", "option_b": "...", "option_c": "...", "option_d": "...", "correct": "A", "explanation": "شرح موجز للإجابة الصحيحة"}}
+]"""
+    try:
+        message = client.messages.create(model="claude-sonnet-4-6", max_tokens=1500,
+                                          messages=[{"role": "user", "content": prompt}])
+        raw = message.content[0].text.strip()
+        raw = re.sub(r"^```json\s*|\s*```$", "", raw.strip())
+        questions = _json.loads(raw)
+        return questions
+    except Exception as e:
+        return [{"error": f"تعذّر توليد الأسئلة: {e}"}]
+
+
 WIKI_LANG_MAP = {"ar": "ar", "en": "en", "ru": "ru"}
 # ويكيبيديا (وكذلك معظم الـ APIs العامة) تشترط وجود User-Agent وصفي، وإلا ترفض الطلب (403/406).
 HTTP_HEADERS = {
@@ -598,6 +646,10 @@ def fetch_diplomatic_news(feed_url: str, limit: int = 6) -> list:
             pub_date = (item.findtext("pubDate") or "").strip()
             desc_raw = item.findtext("description") or ""
             desc_clean = re.sub(r"<[^>]+>", "", unescape(desc_raw)).strip()
+            # تنظيف خاص بصيغة اليوم السابع: إزالة رابط ماركداون مكرر وعبارة "المصدر:..." في نهاية الوصف
+            desc_clean = re.sub(r"\[.*?\]\(https?://\S+\)\s*$", "", desc_clean).strip()
+            desc_clean = re.sub(r"المصدر\s*:\s*\S+\s*$", "", desc_clean).strip()
+            desc_clean = re.sub(r"\.\.\s*$", ".", desc_clean).strip()
             if len(desc_clean) > 260:
                 desc_clean = desc_clean[:260].rsplit(" ", 1)[0] + "…"
             items.append({"title": title, "link": link, "date": pub_date, "description": desc_clean})
@@ -659,8 +711,10 @@ def render_countdown_timer(minutes: int, key_suffix: str = ""):
 # 8ب) مصادر الأخبار الدبلوماسية اليومية (تغذيات RSS رسمية موثوقة)
 # ============================================================================
 NEWS_SOURCES = {
-    "أخبار الأمم المتحدة (عربي)": "https://news.un.org/feed/subscribe/ar/news/all/rss.xml",
-    "RT بالعربية — دولي": "https://arabic.rt.com/rss/",
+    "اليوم السابع — سياسة": "https://www.youm7.com/rss/SectionRss?SectionID=319",
+    "اليوم السابع — أخبار عالمية": "https://www.youm7.com/rss/SectionRss?SectionID=286",
+    "اليوم السابع — أخبار عربية": "https://www.youm7.com/rss/SectionRss?SectionID=88",
+    "اليوم السابع — اقتصاد وبورصة": "https://www.youm7.com/rss/SectionRss?SectionID=297",
 }
 
 # ============================================================================
@@ -772,6 +826,15 @@ h1, h2, h3, h4 {{ color: {T['heading']} !important; font-weight: 700 !important;
 .news-card p {{ color: {T['text']} !important; }}
 .news-card .news-date {{ color: {T['text_soft']} !important; font-size: 12px; }}
 .news-card a {{ color: {T['accent']} !important; font-weight: 700; }}
+
+/* تباعد واضح بين خيارات الأسئلة (لمنع أي تراكم أو تداخل بصري) */
+.stRadio > div {{ gap: 10px !important; }}
+.stRadio [role="radiogroup"] > label {{
+    background: {T['card']}; border: 1.5px solid {T['input_border']}; border-radius: 10px;
+    padding: 10px 14px !important; margin-bottom: 6px !important; display: flex !important;
+    width: 100% !important; box-sizing: border-box;
+}}
+.stRadio [role="radiogroup"] > label:hover {{ border-color: {T['accent']}; }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -938,17 +1001,25 @@ with tab1:
     st.caption(f"إجمالي المصطلحات المعروضة: {len(filtered_df)} من أصل {len(glossary_df)}")
 
     st.markdown("---")
-    st.subheader("🔎 ابحث عن أي مصطلح في ويكيبيديا (مصدر خارجي حي)")
-    st.caption("اكتب أي مصطلح دبلوماسي أو سياسي غير موجود في معجمنا وسنجلب لك تعريفاً حياً من ويكيبيديا.")
-    wiki_col1, wiki_col2 = st.columns([3, 1])
-    with wiki_col1:
-        wiki_query = st.text_input("مصطلح للبحث الخارجي", placeholder="مثال: الأمن الجماعي، Détente، Разрядка")
-    with wiki_col2:
-        wiki_lang_choice = st.selectbox("اللغة", ["ar", "en", "ru"], format_func=lambda x: {"ar": "عربي", "en": "إنجليزي", "ru": "روسي"}[x])
-    if st.button("🌐 ابحث في ويكيبيديا"):
-        if wiki_query.strip():
+    st.subheader("🔎 استكشف أي مصطلح جديد (محتوى متجدد، غير مقتصر على المعجم الثابت)")
+    st.caption("اكتب أي مصطلح سياسي أو دبلوماسي — سواء كان موجوداً في معجمنا أعلاه أم لا — وسنجلب لك تعريفاً حياً ومحدّثاً.")
+
+    explore_col1, explore_col2 = st.columns([3, 1])
+    with explore_col1:
+        explore_query = st.text_input("مصطلح للاستكشاف", placeholder="مثال: الأمن الجماعي، Détente، Разрядка، الدبلوماسية الرقمية")
+    with explore_col2:
+        explore_lang_choice = st.selectbox("لغة ويكيبيديا", ["ar", "en", "ru"], format_func=lambda x: {"ar": "عربي", "en": "إنجليزي", "ru": "روسي"}[x], key="explore_lang")
+
+    ex_btn1, ex_btn2 = st.columns(2)
+    with ex_btn1:
+        wiki_search_clicked = st.button("🌐 ابحث في ويكيبيديا (مصدر خارجي)")
+    with ex_btn2:
+        ai_search_clicked = st.button("🧠 شرح دبلوماسي ذكي متجدد (AI)", disabled=not st.session_state.api_key)
+
+    if wiki_search_clicked:
+        if explore_query.strip():
             with st.spinner("جارٍ البحث في ويكيبيديا..."):
-                result = fetch_wikipedia_summary(wiki_query.strip(), wiki_lang_choice)
+                result = fetch_wikipedia_summary(explore_query.strip(), explore_lang_choice)
             if "error" in result:
                 st.warning(result["error"])
             else:
@@ -957,6 +1028,22 @@ with tab1:
                 st.markdown(f"[🔗 المصدر الكامل على ويكيبيديا]({result['url']})")
         else:
             st.warning("يرجى كتابة مصطلح أولاً.")
+
+    if ai_search_clicked:
+        if not st.session_state.api_key:
+            st.warning("يرجى إدخال مفتاح Claude API في الشريط الجانبي لتفعيل هذه الميزة.")
+        elif explore_query.strip():
+            with st.spinner("جارٍ توليد شرح دبلوماسي متجدد..."):
+                try:
+                    ai_explanation = generate_ai_term_explanation(explore_query.strip(), st.session_state.api_key)
+                    st.markdown(ai_explanation)
+                except Exception as e:
+                    st.error(f"تعذّر توليد الشرح: {e}")
+        else:
+            st.warning("يرجى كتابة مصطلح أولاً.")
+
+    if not st.session_state.api_key:
+        st.caption("🔑 أضف مفتاح Claude API في الشريط الجانبي لتفعيل الشرح الذكي المتجدد — يمنحك تعريفات ومصطلحات ذات صلة لأي كلمة تخطر ببالك، دون الاقتصار على قائمة ثابتة.")
 
     st.markdown("---")
     st.subheader("🎴 بطاقات التعلّم بنظام Leitner (تكرار متباعد)")
@@ -1168,7 +1255,7 @@ with tab2:
 # ============================================================================
 with tab3:
     st.subheader("📝 بنك الأسئلة والاختبارات التفاعلية")
-    mode = st.radio("اختر نوع الاختبار:", ["اختيار من متعدد (MCQ)", "وضع الاختبار المحاكي بالوقت", "أسئلة مقالية (Essay)"], horizontal=True)
+    mode = st.radio("اختر نوع الاختبار:", ["اختيار من متعدد (MCQ)", "🎲 ولّد أسئلة جديدة بالذكاء الاصطناعي", "وضع الاختبار المحاكي بالوقت", "أسئلة مقالية (Essay)"])
 
     if mode == "اختيار من متعدد (MCQ)":
         col_cat, col_diff = st.columns(2)
@@ -1190,8 +1277,8 @@ with tab3:
                 if str(q["question_ru"]).strip():
                     st.caption(f"🇷🇺 {q['question_ru']}")
                 options = {"A": q["option_a"], "B": q["option_b"], "C": q["option_c"], "D": q["option_d"]}
-                choice = st.radio("اختر:", list(options.keys()), format_func=lambda k, o=options: f"{k}) {o}",
-                                   key=f"mcq_{q['id']}", horizontal=True, label_visibility="collapsed")
+                choice = st.radio("اختر إجابة واحدة:", list(options.keys()), format_func=lambda k, o=options: f"{k}) {o}",
+                                   key=f"mcq_{q['id']}", label_visibility="visible")
                 answers[q["id"]] = choice
                 st.markdown("---")
             submitted = st.form_submit_button("📤 تسليم الاختبار", type="primary")
@@ -1206,6 +1293,52 @@ with tab3:
                     icon = "✅" if is_correct else "❌"
                     st.markdown(f"{icon} **{q['question_ar']}** — الإجابة الصحيحة: {q['correct_answer']}")
                     st.caption(q["explanation_ar"])
+
+    elif mode == "🎲 ولّد أسئلة جديدة بالذكاء الاصطناعي":
+        st.markdown("##### 🎲 مولّد الأسئلة الذكي — محتوى جديد كل مرة")
+        st.caption("اكتب أي موضوع دبلوماسي أو سياسي، وسيولّد الذكاء الاصطناعي أسئلة اختيار من متعدد أصلية وجديدة حوله — لا تكرار، ولا اقتصار على بنك أسئلة ثابت.")
+
+        if not st.session_state.api_key:
+            st.warning("🔑 هذه الميزة تتطلب مفتاح Claude API — أضفه في الشريط الجانبي لتفعيلها.")
+        else:
+            gen_col1, gen_col2 = st.columns([3, 1])
+            with gen_col1:
+                gen_topic = st.text_input("الموضوع", placeholder="مثال: العقوبات على روسيا، الأمن السيبراني الدولي، منظمة بريكس")
+            with gen_col2:
+                gen_count = st.selectbox("عدد الأسئلة", [3, 4, 5, 6], index=1)
+
+            if st.button("✨ ولّد الأسئلة الآن", type="primary"):
+                if gen_topic.strip():
+                    with st.spinner("جارٍ توليد أسئلة جديدة حصرياً حول هذا الموضوع..."):
+                        st.session_state.generated_questions = generate_ai_questions(gen_topic.strip(), st.session_state.api_key, n=gen_count)
+                        st.session_state.generated_answers = {}
+                else:
+                    st.warning("يرجى كتابة موضوع أولاً.")
+
+            if st.session_state.get("generated_questions"):
+                gq = st.session_state.generated_questions
+                if gq and "error" in gq[0]:
+                    st.error(gq[0]["error"])
+                else:
+                    with st.form("generated_quiz_form"):
+                        for i, q in enumerate(gq):
+                            st.markdown(f"**{i+1}. {q.get('question', '')}**")
+                            opts = {"A": q.get("option_a", ""), "B": q.get("option_b", ""), "C": q.get("option_c", ""), "D": q.get("option_d", "")}
+                            sel = st.radio("اختر إجابة واحدة:", list(opts.keys()), format_func=lambda k, o=opts: f"{k}) {o}",
+                                           key=f"gen_q_{i}", label_visibility="visible")
+                            st.session_state.generated_answers[i] = sel
+                            st.markdown("---")
+                        gen_submit = st.form_submit_button("📤 تسليم", type="primary")
+
+                    if gen_submit:
+                        correct_count = sum(1 for i, q in enumerate(gq) if st.session_state.generated_answers.get(i) == q.get("correct"))
+                        st.success(f"🎯 نتيجتك: {correct_count} / {len(gq)}")
+                        with st.expander("📋 مراجعة الإجابات والشروحات"):
+                            for i, q in enumerate(gq):
+                                is_correct = st.session_state.generated_answers.get(i) == q.get("correct")
+                                icon = "✅" if is_correct else "❌"
+                                st.markdown(f"{icon} **{q.get('question','')}** — الإجابة الصحيحة: {q.get('correct','')}")
+                                st.caption(q.get("explanation", ""))
 
     elif mode == "وضع الاختبار المحاكي بالوقت":
         st.markdown("##### ⏱️ اختبار محاكي لظروف الامتحان الحقيقية")
@@ -1231,8 +1364,8 @@ with tab3:
                 for _, q in st.session_state.timed_exam_questions.iterrows():
                     st.markdown(f"**{q['question_ar']}**")
                     options = {"A": q["option_a"], "B": q["option_b"], "C": q["option_c"], "D": q["option_d"]}
-                    choice = st.radio("اختر:", list(options.keys()), format_func=lambda k, o=options: f"{k}) {o}",
-                                       key=f"timed_{q['id']}", horizontal=True, label_visibility="collapsed")
+                    choice = st.radio("اختر إجابة واحدة:", list(options.keys()), format_func=lambda k, o=options: f"{k}) {o}",
+                                       key=f"timed_{q['id']}", label_visibility="visible")
                     timed_answers[q["id"]] = choice
                     st.markdown("---")
                 timed_submit = st.form_submit_button("📤 تسليم الاختبار المحاكي", type="primary")
@@ -1301,7 +1434,7 @@ with tab4:
 # ============================================================================
 with tab5:
     st.subheader("📰 الأخبار الدبلوماسية اليومية")
-    st.caption("أخبار حيّة من مصادر رسمية موثوقة (RSS مباشر) — لتبقى مطّلعاً على آخر التطورات الدولية أثناء المذاكرة.")
+    st.caption("أخبار حيّة ومتجددة من موقع اليوم السابع (أحد أكثر المواقع الإخبارية المصرية انتشاراً) — مع تحليل ذكي لدلالتها الدبلوماسية.")
 
     news_col1, news_col2 = st.columns([2, 1])
     with news_col1:
@@ -1336,26 +1469,45 @@ with tab5:
             st.markdown(card, unsafe_allow_html=True)
 
             if st.session_state.api_key:
-                if st.button(f"🧠 اشرح لي الدلالة الدبلوماسية لهذا الخبر", key=f"explain_news_{idx}"):
-                    with st.spinner("جارٍ التحليل..."):
-                        try:
-                            import anthropic
-                            client = anthropic.Anthropic(api_key=st.session_state.api_key)
-                            prompt = (
-                                "أنت أستاذ علاقات دولية يشرح لطالب يستعد لامتحان السلك الدبلوماسي. "
-                                f"اشرح بإيجاز (100-130 كلمة) الدلالة الدبلوماسية والسياسية لهذا الخبر، "
-                                "واذكر أي مصطلحات أو مفاهيم دبلوماسية ذات صلة قد تُطرح في الامتحان:\n\n"
-                                f"العنوان: {item['title']}\nالوصف: {item['description']}"
-                            )
-                            msg = client.messages.create(
-                                model="claude-sonnet-4-6", max_tokens=400,
-                                messages=[{"role": "user", "content": prompt}],
-                            )
-                            st.info(msg.content[0].text)
-                        except Exception as e:
-                            st.error(f"تعذّر توليد الشرح: {e}")
+                nc1, nc2 = st.columns(2)
+                with nc1:
+                    if st.button("🧠 اشرح لي الدلالة الدبلوماسية", key=f"explain_news_{idx}"):
+                        with st.spinner("جارٍ التحليل..."):
+                            try:
+                                import anthropic
+                                client = anthropic.Anthropic(api_key=st.session_state.api_key)
+                                prompt = (
+                                    "أنت أستاذ علاقات دولية يشرح لطالب يستعد لامتحان السلك الدبلوماسي. "
+                                    f"اشرح بإيجاز (100-130 كلمة) الدلالة الدبلوماسية والسياسية لهذا الخبر، "
+                                    "واذكر أي مصطلحات أو مفاهيم دبلوماسية ذات صلة قد تُطرح في الامتحان:\n\n"
+                                    f"العنوان: {item['title']}\nالوصف: {item['description']}"
+                                )
+                                msg = client.messages.create(
+                                    model="claude-sonnet-4-6", max_tokens=400,
+                                    messages=[{"role": "user", "content": prompt}],
+                                )
+                                st.info(msg.content[0].text)
+                            except Exception as e:
+                                st.error(f"تعذّر توليد الشرح: {e}")
+                with nc2:
+                    if st.button("🎯 حوّل هذا الخبر إلى سؤال اختبار", key=f"quiz_news_{idx}"):
+                        with st.spinner("جارٍ توليد سؤال من الخبر..."):
+                            try:
+                                news_topic = f"{item['title']} — {item['description']}"
+                                generated = generate_ai_questions(news_topic, st.session_state.api_key, n=1)
+                                if generated and "error" not in generated[0]:
+                                    gq = generated[0]
+                                    st.markdown(f"**{gq.get('question','')}**")
+                                    for opt_key in ["A", "B", "C", "D"]:
+                                        st.write(f"{opt_key}) {gq.get(f'option_{opt_key.lower()}', '')}")
+                                    with st.expander("✅ عرض الإجابة الصحيحة"):
+                                        st.write(f"الإجابة: {gq.get('correct','')} — {gq.get('explanation','')}")
+                                else:
+                                    st.error(generated[0].get("error", "تعذّر التوليد."))
+                            except Exception as e:
+                                st.error(f"تعذّر توليد السؤال: {e}")
             else:
-                st.caption("🔑 أضف مفتاح Claude API في الشريط الجانبي لتفعيل ميزة 'اشرح لي هذا الخبر' بالذكاء الاصطناعي.")
+                st.caption("🔑 أضف مفتاح Claude API في الشريط الجانبي لتفعيل ميزات الشرح الذكي وتوليد الأسئلة من الأخبار.")
             st.markdown("---")
 
     st.info("💡 نصيحة: تابع هذا القسم يومياً — أسئلة الامتحان الشفوي غالباً ما تتطرق لأحداث دولية جارية.")
