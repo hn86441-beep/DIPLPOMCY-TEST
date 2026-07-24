@@ -504,1723 +504,31 @@ def evaluate_translation(user_text, reference_text, target_lang, glossary_df, we
     )
 
 
-GEMINI_MODEL = "gemini-2.5-flash"
-GEMINI_ENDPOINT = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-
-
-def call_gemini(prompt: str, api_key: str, max_tokens: int = 700) -> str:
-    """استدعاء موحّد لنموذج Gemini المجاني (Google AI Studio) عبر REST — بلا أي مكتبة إضافية."""
-    if requests is None:
-        return "⚠️ مكتبة requests غير متاحة على الخادم."
-    if not api_key:
-        return "⚠️ يرجى إدخال مفتاح Gemini API المجاني في الشريط الجانبي أولاً."
-    try:
-        payload = {
-            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-            "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.5},
-        }
-        headers = {"Content-Type": "application/json", "x-goog-api-key": api_key}
-        r = requests.post(GEMINI_ENDPOINT, headers=headers, json=payload, timeout=30)
-        r.raise_for_status()
-        data = r.json()
-        candidates = data.get("candidates", [])
-        if not candidates:
-            return "⚠️ لم يُعد النموذج أي محتوى. حاول صياغة الطلب بشكل مختلف."
-        parts = candidates[0].get("content", {}).get("parts", [])
-        text = "".join(p.get("text", "") for p in parts).strip()
-        return text or "⚠️ استجابة فارغة من النموذج."
-    except requests.exceptions.HTTPError as e:
-        status = e.response.status_code if e.response is not None else "?"
-        if status == 400:
-            return "⚠️ مفتاح API غير صالح أو الطلب غير مقبول. تحقق من صحة المفتاح."
-        if status == 429:
-            return "⚠️ تم تجاوز الحد المجاني المسموح به مؤقتاً (rate limit). انتظر دقيقة وحاول مجدداً."
-        return f"⚠️ خطأ من خادم Gemini (رمز {status})."
-    except requests.exceptions.Timeout:
-        return "⚠️ انتهت مهلة الاتصال بـ Gemini. حاول مرة أخرى."
-    except Exception as e:
-        return f"⚠️ تعذّر الاتصال بـ Gemini ({e})."
-
-
-def evaluate_with_ai(user_text, reference_text, target_lang, api_key) -> str:
-    lang_names = {"ar": "العربية", "en": "الإنجليزية", "ru": "الروسية"}
-    prompt = f"""أنت خبير ترجمة دبلوماسية محترف. قيّم ترجمة المتدرب التالية مقارنة بالنموذج المرجعي باللغة {lang_names.get(target_lang, target_lang)}.
-
-النموذج المرجعي:
-{reference_text}
-
-ترجمة المتدرب:
-{user_text}
-
-قدّم تقييماً موجزاً ومهنياً (لا يتجاوز 150 كلمة) يتضمن: 1) نقاط القوة 2) الأخطاء الاصطلاحية أو الأسلوبية إن وجدت 3) توصية عملية واحدة للتحسين. اكتب باللغة العربية."""
-    return call_gemini(prompt, api_key, max_tokens=500)
-
-
-def generate_ai_term_explanation(term: str, api_key: str) -> str:
-    """يولّد شرحاً دبلوماسياً غنياً وجديداً لأي مصطلح يطلبه المستخدم — غير مقتصر على المعجم الثابت."""
-    prompt = f"""أنت خبير علاقات دولية ومترجم دبلوماسي محترف. اشرح المصطلح التالي: «{term}»
-
-قدّم إجابة منظمة بالتنسيق التالي بالضبط:
-**التعريف:** (شرح دقيق من 2-3 جمل بالعربية)
-**بالإنجليزية:** (الترجمة الإنجليزية الدقيقة)
-**بالروسية:** (الترجمة الروسية الدقيقة)
-**مثال استخدام دبلوماسي:** (جملة واحدة تستخدم المصطلح في سياق دبلوماسي رسمي)
-**مصطلحات ذات صلة:** (اذكر 3 مصطلحات مرتبطة قد تُطرح في نفس السياق)
-
-كن دقيقاً ومختصراً ومهنياً، وتجنب أي حشو."""
-    return call_gemini(prompt, api_key, max_tokens=600)
-
-
-def generate_ai_questions(topic: str, api_key: str, n: int = 4) -> list:
-    """يولّد أسئلة اختيار من متعدد جديدة وحصرية حول موضوع يحدده المستخدم — محتوى متجدد لا يتكرر."""
+def generate_ai_glossary_terms(existing_terms: list, api_key: str, n: int = 5) -> list:
+    """يولّد مصطلحات دبلوماسية جديدة لم تُذكر بعد، لتوسيع المعجم فعلياً وليس فقط الإجابة عن سؤال واحد."""
     import json as _json
-    prompt = f"""أنت خبير في إعداد امتحانات السلك الدبلوماسي. ولّد {n} أسئلة اختيار من متعدد جديدة وأصلية
-حول موضوع: «{topic}» (بمستوى امتحان السلك الدبلوماسي، متوسط إلى صعب).
+    existing_sample = "، ".join(existing_terms[:60])
+    prompt = f"""أنت خبير مصطلحات دبلوماسية وسياسية. المصطلحات التالية موجودة بالفعل في معجم الطالب:
+{existing_sample}
 
-أعد الإجابة بصيغة JSON فقط، بلا أي نص إضافي قبله أو بعده، بالضبط بهذا الشكل:
+ولّد {n} مصطلحات دبلوماسية أو سياسية أو قانونية جديدة ومختلفة تماماً عن القائمة أعلاه، مهمة لامتحان السلك الدبلوماسي.
+
+أعد الإجابة بصيغة JSON فقط بهذا الشكل بالضبط:
 [
-  {{"question": "نص السؤال بالعربية", "option_a": "...", "option_b": "...", "option_c": "...", "option_d": "...", "correct": "A", "explanation": "شرح موجز للإجابة الصحيحة"}}
+  {{"term_ar": "المصطلح بالعربية", "term_en": "English term", "term_ru": "Термин по-русски", "category": "سياسي أو قانوني أو اقتصادي أو دبلوماسي أو أمني", "definition_ar": "تعريف من جملة واحدة"}}
 ]"""
-    raw = call_gemini(prompt, api_key, max_tokens=1800)
+    raw = call_gemini(prompt, api_key, max_tokens=1200)
     if raw.startswith("⚠️"):
         return [{"error": raw}]
     try:
         cleaned = re.sub(r"^```json\s*|\s*```$", "", raw.strip())
         cleaned = re.sub(r"^```\s*|\s*```$", "", cleaned.strip())
-        questions = _json.loads(cleaned)
-        return questions
+        terms = _json.loads(cleaned)
+        for t in terms:
+            t["source"] = "مولّد بالذكاء الاصطناعي (Gemini)"
+        return terms
     except Exception as e:
-        return [{"error": f"تعذّر تحليل استجابة النموذج ({e}). حاول مرة أخرى."}]
-
-
-def generate_ai_essay(topic: str, api_key: str) -> dict:
-    """يولّد مقالاً تحليلياً سياسياً جديداً بالروسية حول أي موضوع يطلبه المستخدم، مع ترجمة وملاحظات."""
-    import json as _json
-    prompt = f"""أنت كاتب مقالات تحليلية سياسية محترف باللغة الروسية. اكتب مقالاً تحليلياً قصيراً (100-150 كلمة)
-بالروسية حول موضوع: «{topic}»، بأسلوب رسمي يُحاكي المقالات الدبلوماسية والتحليل السياسي.
-
-أعد الإجابة بصيغة JSON فقط بهذا الشكل بالضبط:
-{{"text_ru": "النص الروسي الكامل", "translation_ar": "الترجمة العربية الكاملة", "notes_ar": "ملاحظة قصيرة عن أهم المصطلحات المستخدمة ودلالتها"}}"""
-    raw = call_gemini(prompt, api_key, max_tokens=1200)
-    if raw.startswith("⚠️"):
-        return {"error": raw}
-    try:
-        cleaned = re.sub(r"^```json\s*|\s*```$", "", raw.strip())
-        cleaned = re.sub(r"^```\s*|\s*```$", "", cleaned.strip())
-        return _json.loads(cleaned)
-    except Exception as e:
-        return {"error": f"تعذّر تحليل استجابة النموذج ({e})."}
-
-
-def generate_ai_treaty_card(name: str, api_key: str) -> dict:
-    """يولّد بطاقة معاهدة أو منظمة جديدة غير موجودة في المرجع الثابت."""
-    import json as _json
-    prompt = f"""أنت خبير قانون دولي وعلاقات دولية. زوّدني ببطاقة معلومات عن: «{name}»
-(قد تكون معاهدة أو منظمة دولية أو إقليمية).
-
-أعد الإجابة بصيغة JSON فقط بهذا الشكل بالضبط:
-{{"name_ar": "الاسم بالعربية", "name_en": "الاسم بالإنجليزية", "name_ru": "الاسم بالروسية", "year": "سنة التأسيس أو الإبرام", "type": "نوعها (معاهدة/منظمة/تكتل...)", "summary_ar": "ملخص من جملتين", "key_points": ["نقطة 1", "نقطة 2", "نقطة 3"]}}
-
-إن لم تكن متأكداً من دقة تاريخ أو تفصيل معين، اذكر ذلك بوضوح داخل النص بدلاً من اختلاقه."""
-    raw = call_gemini(prompt, api_key, max_tokens=700)
-    if raw.startswith("⚠️"):
-        return {"error": raw}
-    try:
-        cleaned = re.sub(r"^```json\s*|\s*```$", "", raw.strip())
-        cleaned = re.sub(r"^```\s*|\s*```$", "", cleaned.strip())
-        return _json.loads(cleaned)
-    except Exception as e:
-        return {"error": f"تعذّر تحليل استجابة النموذج ({e})."}
-
-WIKI_LANG_MAP = {"ar": "ar", "en": "en", "ru": "ru"}
-# ويكيبيديا (وكذلك معظم الـ APIs العامة) تشترط وجود User-Agent وصفي، وإلا ترفض الطلب (403/406).
-HTTP_HEADERS = {
-    "User-Agent": "DiplomaticPrepApp/1.0 (Educational Streamlit App; contact: student-project@example.com)",
-    "Accept": "application/json",
-}
-
-
-def fetch_wikipedia_summary_multilang(term: str, preferred_lang: str) -> dict:
-    """يحاول البحث في لغة المستخدم المفضّلة أولاً، ثم يجرّب اللغات الأخرى تلقائياً إن فشلت — لتغطية أوسع بكثير."""
-    lang_order = [preferred_lang] + [l for l in ["ar", "en", "ru"] if l != preferred_lang]
-    last_error = None
-    for lang in lang_order:
-        result = fetch_wikipedia_summary(term, lang)
-        if "error" not in result:
-            result["found_lang"] = lang
-            return result
-        last_error = result["error"]
-    return {"error": last_error or "تعذّر العثور على المصطلح في أي من اللغات الثلاث."}
-
-
-def explore_term_combined(term: str, preferred_lang: str, gemini_key: str) -> dict:
-    """يدمج ويكيبيديا (مصدر مفتوح موسوعي) مع Gemini (تفسير دبلوماسي متخصص) في استعلام واحد شامل.
-    يضمن تغطية شبه كاملة: إن فشلت ويكيبيديا، يكمل Gemini المهمة تلقائياً — وإن نجحت، يضيف Gemini طبقة تخصصية فوقها."""
-    result = {"wiki": None, "ai": None}
-    wiki_result = fetch_wikipedia_summary_multilang(term, preferred_lang)
-    if "error" not in wiki_result:
-        result["wiki"] = wiki_result
-    else:
-        result["wiki_error"] = wiki_result["error"]
-
-    if gemini_key:
-        result["ai"] = generate_ai_term_explanation(term, gemini_key)
-
-    return result
-
-
-def fetch_wikipedia_summary(term: str, lang: str) -> dict:
-    """يجلب ملخصاً حياً من ويكيبيديا لمصطلح معيّن. يُعيد dict فيه title/extract/url أو خطأ."""
-    if requests is None:
-        return {"error": "مكتبة requests غير متاحة على الخادم."}
-    wiki_lang = WIKI_LANG_MAP.get(lang, "en")
-    try:
-        search_url = f"https://{wiki_lang}.wikipedia.org/w/rest.php/v1/search/page"
-        params = {"q": term, "limit": 1}
-        r = requests.get(search_url, params=params, headers=HTTP_HEADERS, timeout=8)
-        r.raise_for_status()
-        data = r.json()
-        pages = data.get("pages", [])
-        if not pages:
-            return {"error": f"لم يُعثر على صفحة مطابقة في ويكيبيديا ({wiki_lang}) لمصطلح «{term}»."}
-        page_key = pages[0].get("key") or pages[0].get("title", "").replace(" ", "_")
-
-        from urllib.parse import quote
-        encoded_title = quote(page_key, safe="")
-        summary_url = f"https://{wiki_lang}.wikipedia.org/api/rest_v1/page/summary/{encoded_title}"
-        r2 = requests.get(summary_url, headers=HTTP_HEADERS, timeout=8)
-        r2.raise_for_status()
-        sd = r2.json()
-
-        if sd.get("type") == "disambiguation":
-            return {"error": f"«{term}» له أكثر من معنى في ويكيبيديا — يرجى تحديد المصطلح بدقة أكبر."}
-
-        extract = sd.get("extract", "").strip()
-        if not extract:
-            return {"error": "لم يتم العثور على ملخص نصي لهذه الصفحة."}
-
-        return {
-            "title": sd.get("title", page_key),
-            "extract": extract,
-            "url": sd.get("content_urls", {}).get("desktop", {}).get("page", f"https://{wiki_lang}.wikipedia.org/wiki/{encoded_title}"),
-        }
-    except requests.exceptions.Timeout:
-        return {"error": "انتهت مهلة الاتصال بويكيبيديا. حاول مرة أخرى."}
-    except requests.exceptions.HTTPError as e:
-        return {"error": f"تعذّر الوصول إلى ويكيبيديا (رمز الخطأ: {e.response.status_code if e.response is not None else '?'})."}
-    except Exception as e:
-        return {"error": f"تعذّر الوصول إلى ويكيبيديا حالياً ({e})."}
-
-
-def fetch_diplomatic_news(feed_url: str, limit: int = 6) -> list:
-    """يجلب ويحلل تغذية RSS رسمية (بدون الحاجة لمكتبات إضافية) ويعيد قائمة عناصر مختصرة."""
-    import xml.etree.ElementTree as ET
-    from html import unescape
-
-    if requests is None:
-        return [{"error": "مكتبة requests غير متاحة على الخادم."}]
-    try:
-        r = requests.get(feed_url, headers=HTTP_HEADERS, timeout=10)
-        r.raise_for_status()
-        root = ET.fromstring(r.content)
-        items = []
-        for item in root.findall(".//item")[:limit]:
-            title = (item.findtext("title") or "").strip()
-            link = (item.findtext("link") or "").strip()
-            pub_date = (item.findtext("pubDate") or "").strip()
-            desc_raw = item.findtext("description") or ""
-            desc_clean = re.sub(r"<[^>]+>", "", unescape(desc_raw)).strip()
-            # تنظيف خاص بصيغة اليوم السابع: إزالة رابط ماركداون مكرر وعبارة "المصدر:..." في نهاية الوصف
-            desc_clean = re.sub(r"\[.*?\]\(https?://\S+\)\s*$", "", desc_clean).strip()
-            desc_clean = re.sub(r"المصدر\s*:\s*\S+\s*$", "", desc_clean).strip()
-            desc_clean = re.sub(r"\.\.\s*$", ".", desc_clean).strip()
-            if len(desc_clean) > 260:
-                desc_clean = desc_clean[:260].rsplit(" ", 1)[0] + "…"
-            items.append({"title": title, "link": link, "date": pub_date, "description": desc_clean})
-        return items
-    except requests.exceptions.Timeout:
-        return [{"error": "انتهت مهلة الاتصال بمصدر الأخبار."}]
-    except Exception as e:
-        return [{"error": f"تعذّر جلب الأخبار حالياً ({e})."}]
-
-
-# ============================================================================
-# 8) مكوّن العداد الزمني (JS خالص — بلا مكتبات إضافية)
-# ============================================================================
-
-def render_countdown_timer(minutes: int, key_suffix: str = ""):
-    total_seconds = int(minutes * 60)
-    html_code = f"""
-    <div style="font-family:'Tajawal',sans-serif; text-align:center; direction:rtl;">
-      <div id="timer-box-{key_suffix}" style="
-            display:inline-block; background:#16273f; border:2px solid #d4af37;
-            border-radius:14px; padding:14px 34px; margin-top:6px;">
-        <div style="color:#d4af37; font-size:13px; margin-bottom:4px;">⏱️ الوقت المتبقي للاختبار</div>
-        <div id="time-display-{key_suffix}" style="color:#eef2f6; font-size:34px; font-weight:700; letter-spacing:2px;">
-          {minutes:02d}:00
-        </div>
-      </div>
-    </div>
-    <script>
-      (function() {{
-        let totalSeconds = {total_seconds};
-        let endTime = Date.now() + totalSeconds * 1000;
-        let el = document.getElementById("time-display-{key_suffix}");
-        let box = document.getElementById("timer-box-{key_suffix}");
-        function tick() {{
-          let remaining = Math.max(0, Math.round((endTime - Date.now()) / 1000));
-          let m = Math.floor(remaining / 60);
-          let s = remaining % 60;
-          if (el) {{
-            el.textContent = String(m).padStart(2,'0') + ":" + String(s).padStart(2,'0');
-          }}
-          if (remaining <= 60 && box) {{
-            box.style.borderColor = "#ff6b6b";
-            el.style.color = "#ff6b6b";
-          }}
-          if (remaining <= 0) {{
-            if (el) el.textContent = "⏰ انتهى الوقت!";
-            clearInterval(iv);
-          }}
-        }}
-        tick();
-        let iv = setInterval(tick, 1000);
-      }})();
-    </script>
-    """
-    components.html(html_code, height=110)
-
-
-# ============================================================================
-# 8ب) مصادر الأخبار الدبلوماسية اليومية (تغذيات RSS رسمية موثوقة)
-# ============================================================================
-NEWS_SOURCES = {
-    "🕊️ مصراوي — شؤون عربية ودولية (دبلوماسي)": "https://www.masrawy.com/rss/feed/202/%D8%B9%D8%B1%D8%A8-%D9%88%D8%B9%D8%A7%D9%84%D9%85",
-    "🏛️ اليوم السابع — سياسة": "https://www.youm7.com/rss/SectionRss?SectionID=319",
-    "🌍 اليوم السابع — أخبار عالمية": "https://www.youm7.com/rss/SectionRss?SectionID=286",
-    "🕌 اليوم السابع — أخبار عربية": "https://www.youm7.com/rss/SectionRss?SectionID=88",
-    "💰 اليوم السابع — اقتصاد وبورصة": "https://www.youm7.com/rss/SectionRss?SectionID=297",
-}
-
-# ============================================================================
-# 9) إعداد الصفحة والتنسيق
-# ============================================================================
-st.set_page_config(page_title="بوابة الإعداد للسلك الدبلوماسي 🇷🇺", page_icon="🕊️",
-                    layout="wide", initial_sidebar_state="expanded")
-
-# ------------------------------------------------------------------
-# نظام السمة (Theme): وضع داكن/فاتح + حجم خط قابل للتحكم — يُحفظ في الجلسة
-# ------------------------------------------------------------------
-if "theme_mode" not in st.session_state:
-    st.session_state.theme_mode = "داكن"
-if "font_scale" not in st.session_state:
-    st.session_state.font_scale = "عادي"
-
-THEMES = {
-    "داكن": {
-        "bg1": "#0f1b2d", "bg2": "#13233a", "card": "#16273f", "card_border": "#d4af37",
-        "text": "#f3f6fa", "text_soft": "#c9d3e0", "heading": "#e9c568", "accent": "#d4af37",
-        "accent_text": "#0f1b2d", "input_bg": "#1c2f4a", "input_text": "#ffffff", "input_border": "#3a5170",
-    },
-    "فاتح": {
-        "bg1": "#f7f4ec", "bg2": "#fbfaf6", "card": "#ffffff", "card_border": "#b8912f",
-        "text": "#1c1c1c", "text_soft": "#3d3d3d", "heading": "#8a6d1f", "accent": "#b8912f",
-        "accent_text": "#ffffff", "input_bg": "#ffffff", "input_text": "#1c1c1c", "input_border": "#c9b77f",
-    },
-}
-FONT_SCALES = {"عادي": "16px", "كبير": "18px", "كبير جداً": "21px"}
-
-T = THEMES[st.session_state.theme_mode]
-BASE_FONT = FONT_SCALES[st.session_state.font_scale]
-
-st.markdown(f"""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;900&display=swap');
-
-html, body, [class*="css"] {{ font-family: 'Tajawal', sans-serif; direction: rtl; font-size: {BASE_FONT}; }}
-.stApp {{ background: linear-gradient(180deg, {T['bg1']} 0%, {T['bg2']} 100%); }}
-
-/* العناوين */
-h1, h2, h3, h4 {{ color: {T['heading']} !important; font-weight: 700 !important; }}
-
-/* النصوص العامة داخل حاويات Streamlit (بدون المساس بالحقول البيضاء للإدخال) */
-[data-testid="stMarkdownContainer"] p,
-[data-testid="stMarkdownContainer"] li,
-[data-testid="stMarkdownContainer"] span,
-[data-testid="stCaptionContainer"],
-[data-testid="stMetricLabel"],
-[data-testid="stWidgetLabel"] p,
-.stRadio label, .stCheckbox label, .stSelectbox label {{
-    color: {T['text']} !important;
-    font-size: {BASE_FONT} !important;
-    line-height: 1.9 !important;
-}}
-[data-testid="stCaptionContainer"] {{ color: {T['text_soft']} !important; opacity: 1 !important; }}
-[data-testid="stMetricValue"] {{ color: {T['heading']} !important; font-weight: 800 !important; }}
-
-/* حقول الإدخال: خلفية وتباين واضحان دوماً بصرف النظر عن السمة العامة */
-.stTextInput input, .stTextArea textarea, .stNumberInput input {{
-    background-color: {T['input_bg']} !important;
-    color: {T['input_text']} !important;
-    border: 1.5px solid {T['input_border']} !important;
-    font-size: {BASE_FONT} !important;
-    border-radius: 8px !important;
-}}
-.stSelectbox div[data-baseweb="select"] > div {{
-    background-color: {T['input_bg']} !important;
-    color: {T['input_text']} !important;
-    border: 1.5px solid {T['input_border']} !important;
-}}
-.stSelectbox div[data-baseweb="select"] * {{ color: {T['input_text']} !important; }}
-[data-baseweb="popover"] li {{ color: #1c1c1c !important; }}
-
-/* التبويبات */
-.stTabs [data-baseweb="tab-list"] {{ gap: 6px; flex-wrap: wrap; }}
-.stTabs [data-baseweb="tab"] {{ background-color: {T['card']}; border-radius: 8px 8px 0 0; padding: 10px 18px;
-                                  color: {T['heading']} !important; font-weight: 700; font-size: {BASE_FONT}; }}
-.stTabs [aria-selected="true"] {{ background-color: {T['accent']} !important; color: {T['accent_text']} !important; }}
-.stTabs [aria-selected="true"] p {{ color: {T['accent_text']} !important; }}
-
-/* البطاقات المخصصة */
-.metric-card {{ background: {T['card']}; border: 1px solid {T['card_border']}; border-radius: 12px; padding: 16px; text-align: center; }}
-.metric-card h1, .metric-card h2 {{ color: {T['heading']} !important; }}
-.metric-card p {{ color: {T['text']} !important; margin: 0; }}
-
-.flashcard {{ background: linear-gradient(135deg, {T['card']}, {T['bg1']}); border: 2px solid {T['card_border']}; border-radius: 16px;
-             padding: 40px 20px; text-align: center; min-height: 160px; display: flex; flex-direction: column;
-             justify-content: center; box-shadow: 0 4px 14px rgba(0,0,0,0.25); }}
-.flashcard h2 {{ color: {T['heading']} !important; }}
-.flashcard p {{ color: {T['text_soft']} !important; }}
-
-.badge {{ display:inline-block; background:{T['accent']}; color:{T['accent_text']} !important; padding: 3px 12px; border-radius: 20px; font-size: 13px; font-weight:700; margin: 2px; }}
-.box-badge {{ display:inline-block; padding: 3px 10px; border-radius: 10px; font-size: 12px; font-weight:700; margin-inline-start:6px; }}
-
-.treaty-card {{ background: {T['card']}; border: 1px solid {T['card_border']}; border-radius: 14px; padding: 18px 20px; margin-bottom: 14px; }}
-.treaty-card h4 {{ margin-bottom: 4px; color: {T['heading']} !important; }}
-.treaty-card p, .treaty-card li {{ color: {T['text']} !important; font-size: {BASE_FONT}; }}
-.treaty-card a {{ color: {T['accent']} !important; font-weight: 700; }}
-
-.source-tag {{ display:inline-block; background:{T['bg1']}; border:1px solid {T['accent']}; color:{T['accent']} !important;
-              padding: 3px 12px; border-radius: 20px; font-size: 12px; margin-top: 6px; }}
-
-.essay-box {{ background:{T['card']}; border-right: 4px solid {T['accent']}; border-radius: 8px; padding: 16px 18px; margin-bottom: 10px; }}
-.essay-box, .essay-box * {{ color: {T['text']} !important; font-size: {BASE_FONT}; line-height: 2 !important; }}
-
-.news-card {{ background: {T['card']}; border: 1px solid {T['card_border']}; border-radius: 12px; padding: 16px 18px; margin-bottom: 12px; }}
-.news-card h5 {{ color: {T['heading']} !important; margin-bottom: 6px; }}
-.news-card p {{ color: {T['text']} !important; }}
-.news-card .news-date {{ color: {T['text_soft']} !important; font-size: 12px; }}
-.news-card a {{ color: {T['accent']} !important; font-weight: 700; }}
-
-/* تباعد واضح بين خيارات الأسئلة (لمنع أي تراكم أو تداخل بصري) */
-.stRadio > div {{ gap: 10px !important; }}
-.stRadio [role="radiogroup"] > label {{
-    background: {T['card']}; border: 1.5px solid {T['input_border']}; border-radius: 10px;
-    padding: 10px 14px !important; margin-bottom: 6px !important; display: flex !important;
-    width: 100% !important; box-sizing: border-box;
-}}
-.stRadio [role="radiogroup"] > label:hover {{ border-color: {T['accent']}; }}
-</style>
-""", unsafe_allow_html=True)
-
-# ============================================================================
-# 10) حالة الجلسة
-# ============================================================================
-defaults = {
-    "flash_index": 0,
-    "flash_flipped": False,
-    "leitner_boxes": {},
-    "quiz_score": 0,
-    "quiz_total": 0,
-    "translation_history": [],
-    "study_streak_dates": set(),
-    "api_key": "",
-    "daily_word": None,
-    "exam_started": False,
-    "exam_answers": {},
-}
-for k, v in defaults.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
-
-st.session_state.study_streak_dates.add(datetime.now().strftime("%Y-%m-%d"))
-
-glossary_df = pd.DataFrame(GLOSSARY)
-texts_df = pd.DataFrame(TEXTS)
-mcq_df = pd.DataFrame(MCQ)
-essays_df = pd.DataFrame(ESSAYS)
-treaties_df = pd.DataFrame(TREATIES_ORGS)
-
-for term in glossary_df["term_ar"]:
-    st.session_state.leitner_boxes.setdefault(term, 1)
-
-if st.session_state.daily_word is None:
-    st.session_state.daily_word = glossary_df.sample(1).iloc[0].to_dict()
-
-BOX_COLORS = {1: "#ff6b6b", 2: "#ffa94d", 3: "#ffd43b", 4: "#69db7c", 5: "#38d9a9"}
-BOX_LABELS = {1: "جديد", 2: "قيد التعلم", 3: "مألوف", 4: "شبه متقن", 5: "متقن تماماً"}
-
-# ============================================================================
-# 11) الشريط الجانبي
-# ============================================================================
-with st.sidebar:
-    st.markdown("## 🕊️ بوابة الدبلوماسي")
-    st.markdown("**الإعداد لامتحان السلك الدبلوماسي**\nتركيز: اللغة الروسية 🇷🇺")
-    st.markdown("---")
-
-    st.markdown("### 🎨 إعدادات العرض")
-    new_theme = st.radio("السمة", ["داكن", "فاتح"], index=["داكن", "فاتح"].index(st.session_state.theme_mode), horizontal=True)
-    new_font = st.select_slider("حجم الخط", options=["عادي", "كبير", "كبير جداً"], value=st.session_state.font_scale)
-    if new_theme != st.session_state.theme_mode or new_font != st.session_state.font_scale:
-        st.session_state.theme_mode = new_theme
-        st.session_state.font_scale = new_font
-        st.rerun()
-    st.markdown("---")
-
-    st.markdown("### 🔥 سلسلة المذاكرة")
-    st.markdown(f"<div class='metric-card'><h2>{len(st.session_state.study_streak_dates)}</h2><p>أيام مذاكرة مسجّلة</p></div>", unsafe_allow_html=True)
-
-    mastered = sum(1 for b in st.session_state.leitner_boxes.values() if b >= 5)
-    total_terms = len(glossary_df)
-    st.markdown("### 📊 إحصائياتك")
-    st.progress(mastered / total_terms if total_terms else 0)
-    st.caption(f"مصطلحات متقنة تماماً: {mastered} / {total_terms}")
-
-    if st.session_state.quiz_total:
-        acc = round(st.session_state.quiz_score / st.session_state.quiz_total * 100, 1)
-        st.caption(f"دقة الاختبار الذاتي: {acc}%")
-
-    st.markdown("---")
-    st.markdown("### 💾 حفظ / استعادة تقدمك")
-    st.caption("لا يوجد تسجيل دخول — احفظ تقدمك كملف JSON واستورده لاحقاً.")
-
-    progress_payload = {
-        "leitner_boxes": st.session_state.leitner_boxes,
-        "quiz_score": st.session_state.quiz_score,
-        "quiz_total": st.session_state.quiz_total,
-        "translation_history": st.session_state.translation_history,
-        "study_streak_dates": list(st.session_state.study_streak_dates),
-    }
-    st.download_button(
-        "⬇️ تحميل ملف التقدم",
-        data=json.dumps(progress_payload, ensure_ascii=False, indent=2),
-        file_name=f"my_progress_{datetime.now().strftime('%Y%m%d')}.json",
-        mime="application/json",
-    )
-    uploaded_progress = st.file_uploader("⬆️ استيراد ملف تقدم سابق", type=["json"], key="progress_uploader")
-    if uploaded_progress is not None:
-        try:
-            data = json.load(uploaded_progress)
-            st.session_state.leitner_boxes.update(data.get("leitner_boxes", {}))
-            st.session_state.quiz_score = data.get("quiz_score", st.session_state.quiz_score)
-            st.session_state.quiz_total = data.get("quiz_total", st.session_state.quiz_total)
-            st.session_state.translation_history = data.get("translation_history", st.session_state.translation_history)
-            st.session_state.study_streak_dates.update(set(data.get("study_streak_dates", [])))
-            st.success("✅ تم استيراد تقدمك بنجاح!")
-        except Exception as e:
-            st.error(f"تعذّر قراءة الملف: {e}")
-
-    st.markdown("---")
-    st.markdown("### 🔑 مفتاح Gemini API (مجاني تماماً)")
-    st.caption(
-        "يشغّل ميزات التوليد الذكي المتجدد (شرح أي مصطلح، أسئلة جديدة، مقالات، أخبار مشروحة). "
-        "المفتاح مجاني 100% من Google — لا حاجة لبطاقة ائتمان."
-    )
-    st.markdown("[🆓 احصل على مفتاحك المجاني من Google AI Studio ←](https://aistudio.google.com/apikey)")
-    st.session_state.api_key = st.text_input("Gemini API Key", type="password", value=st.session_state.api_key,
-                                              placeholder="AIza...", help="يبدأ عادة بـ AIza")
-    st.caption("💡 باقي التطبيق (المعجم، البطاقات، بنك الأسئلة، مرجع المعاهدات، الأخبار، مقيّم الترجمة) يعمل بالكامل بدون أي مفتاح.")
-
-    st.markdown("---")
-    st.caption("صُنع بعناية لطلاب السلك الدبلوماسي 🎓")
-
-# ============================================================================
-# 12) الرأس الرئيسي + كلمة اليوم
-# ============================================================================
-st.title("🕊️ بوابة الإعداد لامتحان السلك الدبلوماسي")
-st.markdown("##### تركيز خاص على اللغة الروسية والترجمة الدبلوماسية 🇷🇺 🇸🇦")
-
-dw = st.session_state.daily_word
-st.markdown(
-    f"<div class='metric-card' style='text-align:right;padding:14px 20px;'>"
-    f"🌟 <b>مصطلح اليوم:</b> {dw['term_ar']} — <span style='color:#d4af37'>{dw['term_ru']}</span> "
-    f"<i>({dw['term_en']})</i><br><span style='opacity:0.8;font-size:13px'>{dw['definition_ar']}</span> "
-    f"<span class='source-tag'>📚 المصدر: {dw['source']}</span></div>",
-    unsafe_allow_html=True,
-)
-
-quote_pool = [
-    "«الدبلوماسية هي فن قول 'كلب لطيف' حتى تجد حجراً» — وينستون تشرشل",
-    "«الكلمة الدبلوماسية الصحيحة توازي فيلقاً من الجيوش» — نابليون بونابرت",
-    "«السياسة الخارجية ليست عملاً خيرياً، بل ممارسة لتبادل المصالح» — هنري كيسنجر",
-]
-st.info(random.choice(quote_pool))
-
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
-    ["📖 المعجم الثلاثي اللغة", "🎓 استوديو الترجمة والمقالات", "📝 بنك الأسئلة والاختبارات",
-     "🏛️ مرجع المعاهدات والمنظمات", "📰 الأخبار الدبلوماسية اليومية", "🏆 لوحة التقدم"]
-)
-
-# ============================================================================
-# التبويب 1: المعجم + Leitner + بحث ويكيبيديا
-# ============================================================================
-with tab1:
-    st.subheader("📖 المعجم الدبلوماسي الثلاثي اللغة")
-
-    col_filter1, col_filter2 = st.columns(2)
-    with col_filter1:
-        category_filter = st.selectbox("تصفية حسب الفئة", ["الكل"] + sorted(glossary_df["category"].unique().tolist()))
-    with col_filter2:
-        search_term = st.text_input("🔍 بحث عن مصطلح")
-
-    filtered_df = glossary_df.copy()
-    if category_filter != "الكل":
-        filtered_df = filtered_df[filtered_df["category"] == category_filter]
-    if search_term:
-        mask = filtered_df.apply(
-            lambda r: search_term.lower() in str(r["term_ar"]).lower()
-            or search_term.lower() in str(r["term_en"]).lower()
-            or search_term.lower() in str(r["term_ru"]).lower(), axis=1)
-        filtered_df = filtered_df[mask]
-
-    st.dataframe(
-        filtered_df[["term_ar", "term_en", "term_ru", "category", "definition_ar", "source"]],
-        use_container_width=True, hide_index=True,
-        column_config={"term_ar": "المصطلح (عربي)", "term_en": "English", "term_ru": "Русский",
-                        "category": "الفئة", "definition_ar": "التعريف", "source": "📚 المصدر"},
-    )
-    st.caption(f"إجمالي المصطلحات المعروضة: {len(filtered_df)} من أصل {len(glossary_df)}")
-
-    st.markdown("---")
-    st.subheader("🔎 استكشف أي مصطلح جديد (مصدر مزدوج متجدد — لا يقتصر على المعجم الثابت)")
-    st.caption(
-        "اكتب أي مصطلح سياسي أو دبلوماسي، موجوداً في معجمنا أعلاه أم لا. سنبحث عنه في ويكيبيديا "
-        "بثلاث لغات تلقائياً (عربي ← إنجليزي ← روسي، أيها وُجد أولاً)، وإن توفر مفتاح Gemini المجاني "
-        "سنضيف شرحاً دبلوماسياً متخصصاً مولّداً حديثاً — بحيث لا يكاد مصطلح يفلت من التغطية."
-    )
-
-    explore_col1, explore_col2 = st.columns([3, 1])
-    with explore_col1:
-        explore_query = st.text_input("مصطلح للاستكشاف", placeholder="مثال: الأمن الجماعي، Détente، Разрядка، الدبلوماسية الرقمية")
-    with explore_col2:
-        explore_lang_choice = st.selectbox("اللغة المفضّلة للبحث", ["ar", "en", "ru"], format_func=lambda x: {"ar": "عربي", "en": "إنجليزي", "ru": "روسي"}[x], key="explore_lang")
-
-    explore_clicked = st.button("🔍 استكشف هذا المصطلح الآن", type="primary")
-
-    if explore_clicked:
-        if not explore_query.strip():
-            st.warning("يرجى كتابة مصطلح أولاً.")
-        else:
-            with st.spinner("جارٍ البحث في ويكيبيديا (بثلاث لغات عند الحاجة) وتوليد شرح دبلوماسي..."):
-                combined = explore_term_combined(explore_query.strip(), explore_lang_choice, st.session_state.api_key)
-
-            wiki_lang_names = {"ar": "العربية", "en": "الإنجليزية", "ru": "الروسية"}
-            if combined.get("wiki"):
-                w = combined["wiki"]
-                found_lang_label = wiki_lang_names.get(w.get("found_lang", explore_lang_choice), "")
-                st.markdown(f"#### 🌐 {w['title']} <span class='source-tag'>ويكيبيديا — {found_lang_label}</span>", unsafe_allow_html=True)
-                st.write(w["extract"])
-                st.markdown(f"[🔗 المصدر الكامل]({w['url']})")
-            else:
-                st.info(f"🌐 ويكيبيديا: {combined.get('wiki_error', 'لم يُعثر على نتيجة.')}")
-
-            if combined.get("ai"):
-                st.markdown("---")
-                st.markdown("#### 🧠 شرح دبلوماسي متخصص (Gemini AI)")
-                st.markdown(combined["ai"])
-            elif not st.session_state.api_key:
-                st.caption(
-                    "🔑 لم يُعثر على نتيجة كافية؟ أضف مفتاح Gemini API المجاني (رابط في الشريط الجانبي) "
-                    "ليكمل الذكاء الاصطناعي أي فجوة تتركها ويكيبيديا — يغطي عملياً أي مصطلح سياسي أو دبلوماسي موجود."
-                )
-
-
-    st.markdown("---")
-    st.subheader("🎴 بطاقات التعلّم بنظام Leitner (تكرار متباعد)")
-    st.caption("كل بطاقة تنتقل بين 5 صناديق حسب أدائك: كل إجابة صحيحة تدفعها صندوقاً للأمام، وكل خطأ يعيدها للصندوق الأول.")
-
-    upload = st.file_uploader("أو ارفع ملف CSV خاص بمصطلحاتك (أعمدة: term_ar, term_en, term_ru, category, definition_ar)", type=["csv"])
-    active_df = pd.read_csv(upload) if upload is not None else filtered_df.reset_index(drop=True)
-
-    review_mode = st.checkbox("🎯 وضع المراجعة الذكية (أولوية للبطاقات الأضعف)", value=True)
-    if review_mode and upload is None:
-        active_df = active_df.copy()
-        active_df["_box"] = active_df["term_ar"].map(lambda t: st.session_state.leitner_boxes.get(t, 1))
-        active_df = active_df.sort_values("_box").reset_index(drop=True)
-
-    if len(active_df) == 0:
-        st.warning("لا توجد مصطلحات مطابقة لعرضها كبطاقات.")
-    else:
-        st.session_state.flash_index %= len(active_df)
-        row = active_df.iloc[st.session_state.flash_index]
-        term_key = row["term_ar"]
-        box_level = st.session_state.leitner_boxes.get(term_key, 1)
-
-        card_html = f"""
-        <div class="flashcard">
-            <span class="badge">{row['category']}</span>
-            <span class="box-badge" style="background:{BOX_COLORS[box_level]};color:#0f1b2d;">صندوق {box_level} — {BOX_LABELS[box_level]}</span>
-            <h2>{row['term_ar'] if not st.session_state.flash_flipped else row['term_ru']}</h2>
-            <p style="opacity:0.7">{'اضغط "قلب البطاقة" لرؤية الترجمة الروسية والإنجليزية' if not st.session_state.flash_flipped else f"English: {row['term_en']}"}</p>
-        </div>
-        """
-        st.markdown(card_html, unsafe_allow_html=True)
-        if st.session_state.flash_flipped:
-            st.caption(f"📖 {row['definition_ar']}")
-
-        c1, c2, c3, c4, c5 = st.columns(5)
-        with c1:
-            if st.button("⬅️ السابق"):
-                st.session_state.flash_index -= 1
-                st.session_state.flash_flipped = False
-                st.rerun()
-        with c2:
-            if st.button("🔄 قلب البطاقة"):
-                st.session_state.flash_flipped = not st.session_state.flash_flipped
-                st.rerun()
-        with c3:
-            if st.button("➡️ التالي"):
-                st.session_state.flash_index += 1
-                st.session_state.flash_flipped = False
-                st.rerun()
-        with c4:
-            if st.button("✅ أتقنتها"):
-                st.session_state.leitner_boxes[term_key] = min(5, box_level + 1)
-                st.session_state.flash_index += 1
-                st.session_state.flash_flipped = False
-                st.rerun()
-        with c5:
-            if st.button("❌ أحتاج مراجعة"):
-                st.session_state.leitner_boxes[term_key] = 1
-                st.session_state.flash_index += 1
-                st.session_state.flash_flipped = False
-                st.rerun()
-
-        st.caption(f"البطاقة {st.session_state.flash_index + 1} من {len(active_df)}")
-
-    st.markdown("---")
-    st.subheader("🧠 الاختبار الذاتي السريع (مصطلح ↔ ترجمة)")
-
-    if st.button("🎲 ابدأ سؤالاً عشوائياً"):
-        st.session_state.quiz_row = glossary_df.sample(1).iloc[0]
-        st.session_state.quiz_options = None
-
-    if "quiz_row" in st.session_state:
-        qr = st.session_state.quiz_row
-        st.write(f"ما هي الترجمة **الروسية** الصحيحة للمصطلح: **{qr['term_ar']}** ؟")
-        if st.session_state.get("quiz_options") is None:
-            wrong_options = glossary_df[glossary_df["term_ar"] != qr["term_ar"]]["term_ru"].sample(3).tolist()
-            options = wrong_options + [qr["term_ru"]]
-            random.shuffle(options)
-            st.session_state.quiz_options = options
-        choice = st.radio("اختر الإجابة:", st.session_state.quiz_options, key="quiz_choice")
-        if st.button("تحقق من الإجابة"):
-            st.session_state.quiz_total += 1
-            box_level = st.session_state.leitner_boxes.get(qr["term_ar"], 1)
-            if choice == qr["term_ru"]:
-                st.success("✅ إجابة صحيحة! أحسنت.")
-                st.session_state.quiz_score += 1
-                st.session_state.leitner_boxes[qr["term_ar"]] = min(5, box_level + 1)
-            else:
-                st.error(f"❌ غير صحيح. الإجابة الصحيحة: **{qr['term_ru']}**")
-                st.session_state.leitner_boxes[qr["term_ar"]] = 1
-
-# ============================================================================
-# التبويب 2: استوديو الترجمة والمقالات
-# ============================================================================
-with tab2:
-    studio_mode = st.radio(
-        "اختر القسم:", ["🌐 محاكي الترجمة (مع عداد الوقت)", "📰 نماذج المقالات السياسية للمراجعة"], horizontal=True
-    )
-
-    if studio_mode == "🌐 محاكي الترجمة (مع عداد الوقت)":
-        st.subheader("🌐 استوديو الترجمة الدبلوماسية")
-        st.caption("اختر نصاً، فعّل عداد الوقت لمحاكاة ظروف الامتحان، ترجم النص، ثم قيّم أداءك بمحرك التقييم الذكي.")
-
-        text_titles = texts_df["title_ar"].tolist()
-        selected_title = st.selectbox("اختر النص الدبلوماسي:", text_titles)
-        text_row = texts_df[texts_df["title_ar"] == selected_title].iloc[0]
-
-        lang_labels = {"ar": "العربية", "en": "الإنجليزية", "ru": "الروسية"}
-        st.markdown(f"**اتجاه الترجمة:** {lang_labels[text_row['source_lang']]} ⬅️ {lang_labels[text_row['target_lang']]} "
-                    f"&nbsp; | &nbsp; **مستوى الصعوبة:** {text_row['difficulty']}")
-
-        timer_col1, timer_col2 = st.columns([1, 2])
-        with timer_col1:
-            exam_minutes = st.selectbox("⏱️ مدة محاكاة الامتحان (دقيقة)", [5, 10, 15, 20, 30], index=2)
-            start_timer = st.button("▶️ بدء العداد الزمني")
-        with timer_col2:
-            if start_timer:
-                st.session_state.exam_started = True
-            if st.session_state.exam_started:
-                render_countdown_timer(exam_minutes, key_suffix="studio")
-            else:
-                st.caption("اضغط 'بدء العداد الزمني' لمحاكاة ضغط وقت الامتحان الحقيقي.")
-
-        st.markdown("##### 📄 النص المصدر")
-        st.text_area("النص الأصلي", value=text_row["source_text"], height=120, disabled=True, label_visibility="collapsed")
-        source_word_count = len(text_row["source_text"].split())
-        st.caption(f"عدد كلمات النص المصدر: {source_word_count}")
-
-        st.markdown("##### ✍️ ترجمتك")
-        user_translation = st.text_area("اكتب ترجمتك هنا", height=140, key=f"trans_{text_row['id']}", label_visibility="collapsed")
-        live_word_count = len(user_translation.split()) if user_translation.strip() else 0
-        live_char_count = len(user_translation)
-        wc1, wc2, wc3 = st.columns(3)
-        wc1.metric("📝 عدد الكلمات", live_word_count)
-        wc2.metric("🔤 عدد الأحرف", live_char_count)
-        ratio_pct = round((live_word_count / source_word_count) * 100, 0) if source_word_count else 0
-        wc3.metric("📊 نسبة الطول للنص الأصلي", f"{int(ratio_pct)}%")
-
-        col_a, col_b = st.columns([1, 1])
-        with col_a:
-            evaluate_clicked = st.button("🔎 قيّم ترجمتي", type="primary")
-        with col_b:
-            show_model = st.checkbox("👁️ أظهر النموذج المرجعي")
-
-        if show_model:
-            st.markdown("##### 🏛️ النموذج المرجعي (احترافي)")
-            st.success(text_row["model_translation"])
-
-        if evaluate_clicked:
-            if not user_translation.strip():
-                st.warning("يرجى كتابة ترجمتك أولاً.")
-            else:
-                result = evaluate_translation(user_translation, text_row["model_translation"], text_row["target_lang"], glossary_df)
-                st.session_state.translation_history.append(
-                    {"title": selected_title, "score": result.overall_score, "date": datetime.now().strftime("%Y-%m-%d %H:%M")}
-                )
-                st.markdown("### 📊 تقرير التقييم")
-                m1, m2, m3, m4, m5 = st.columns(5)
-                m1.metric("النتيجة الإجمالية", f"{result.overall_score}")
-                m2.metric("التشابه الدلالي", f"{result.similarity_score}%")
-                m3.metric("المصطلحات", f"{result.terminology_score}%")
-                m4.metric("الاكتمال", f"{result.completeness_score}%")
-                m5.metric("الرسمية اللغوية", f"{result.formality_score}%")
-                st.markdown(f"**التقييم العام:** {result.grade_label_ar}")
-
-                if result.missing_terms:
-                    st.warning("مصطلحات دبلوماسية فاتتك: " + "، ".join(result.missing_terms))
-                if result.matched_terms:
-                    st.info("مصطلحات وظّفتها بنجاح: " + "، ".join(result.matched_terms))
-
-                with st.expander("🔍 مقارنة تفصيلية (فروقات النص)"):
-                    st.markdown(result.diff_html, unsafe_allow_html=True)
-
-                lt_ar, lt_en, lt_ru = st.tabs(["🇸🇦 تقرير عربي", "🇬🇧 English Report", "🇷🇺 Отчёт на русском"])
-                with lt_ar:
-                    st.text(result.feedback_ar)
-                with lt_en:
-                    st.text(result.feedback_en)
-                with lt_ru:
-                    st.text(result.feedback_ru)
-
-                if st.session_state.api_key:
-                    with st.spinner("جارٍ التحليل المتقدم عبر الذكاء الاصطناعي..."):
-                        try:
-                            ai_feedback = evaluate_with_ai(user_translation, text_row["model_translation"], text_row["target_lang"], st.session_state.api_key)
-                            st.markdown("### 🤖 تحليل احترافي إضافي (Gemini AI)")
-                            st.markdown(ai_feedback)
-                        except Exception as e:
-                            st.error(f"تعذّر الاتصال بالـ API: {e}")
-
-    else:
-        st.subheader("📰 نماذج المقالات السياسية والتحليلية للمراجعة")
-
-        st.markdown("##### ✨ ولّد مقالاً تحليلياً جديداً الآن (محتوى متجدد حول أي موضوع)")
-        st.caption("اكتب أي موضوع سياسي أو دبلوماسي، وسيكتب Gemini مقالاً تحليلياً أصلياً بالروسية مع ترجمته وملاحظاته — بلا تكرار وبلا حدود مواضيع.")
-
-        if not st.session_state.api_key:
-            st.info("🔑 أضف مفتاح Gemini API المجاني في الشريط الجانبي لتفعيل توليد مقالات جديدة عند الطلب.")
-        else:
-            essay_topic = st.text_input("موضوع المقال", placeholder="مثال: تصاعد التوتر في مضيق هرمز، مستقبل العلاقات الروسية الأفريقية")
-            if st.button("✨ ولّد مقالاً جديداً"):
-                if essay_topic.strip():
-                    with st.spinner("جارٍ كتابة مقال تحليلي جديد..."):
-                        generated_essay = generate_ai_essay(essay_topic.strip(), st.session_state.api_key)
-                    if "error" in generated_essay:
-                        st.error(generated_essay["error"])
-                    else:
-                        st.markdown(f"<div class='essay-box'><b>🇷🇺 النص الروسي:</b><br>{generated_essay.get('text_ru','')}</div>", unsafe_allow_html=True)
-                        with st.expander("🇸🇦 عرض الترجمة العربية"):
-                            st.write(generated_essay.get("translation_ar", ""))
-                        with st.expander("💡 ملاحظات لغوية واصطلاحية"):
-                            st.caption(generated_essay.get("notes_ar", ""))
-                        gen_wc = len(generated_essay.get("text_ru", "").split())
-                        st.caption(f"عدد كلمات النص الروسي: {gen_wc}")
-                else:
-                    st.warning("يرجى كتابة موضوع أولاً.")
-
-        st.markdown("---")
-        st.markdown("##### 📚 نماذج مرجعية أساسية (للانطلاق منها)")
-        st.caption("نماذج أصلية بأسلوب المقال التحليلي السياسي بالروسية، مع الترجمة العربية وملاحظات لغوية لتوسيع حصيلتك الاصطلاحية.")
-
-        for essay in SAMPLE_ESSAYS:
-            with st.container():
-                st.markdown(f"#### {essay['title_ar']}")
-                st.markdown(f"<div class='essay-box'><b>🇷🇺 النص الروسي:</b><br>{essay['text']}</div>", unsafe_allow_html=True)
-                with st.expander("🇸🇦 عرض الترجمة العربية المقترحة"):
-                    st.write(essay["translation_ar"])
-                with st.expander("💡 ملاحظات لغوية واصطلاحية"):
-                    st.caption(essay["notes_ar"])
-                word_count_essay = len(essay["text"].split())
-                st.caption(f"عدد كلمات النص الروسي: {word_count_essay}")
-                st.markdown("---")
-
-# ============================================================================
-# التبويب 3: بنك الأسئلة والاختبارات التفاعلية
-# ============================================================================
-with tab3:
-    st.subheader("📝 بنك الأسئلة والاختبارات التفاعلية")
-    mode = st.radio("اختر نوع الاختبار:", ["اختيار من متعدد (MCQ)", "🎲 ولّد أسئلة جديدة بالذكاء الاصطناعي", "وضع الاختبار المحاكي بالوقت", "أسئلة مقالية (Essay)"])
-
-    if mode == "اختيار من متعدد (MCQ)":
-        col_cat, col_diff = st.columns(2)
-        with col_cat:
-            cat_filter = st.selectbox("تصفية حسب الفئة", ["الكل"] + sorted(mcq_df["category"].unique().tolist()))
-        with col_diff:
-            diff_filter = st.selectbox("تصفية حسب الصعوبة", ["الكل"] + sorted(mcq_df["difficulty"].unique().tolist()))
-
-        display_mcq = mcq_df.copy()
-        if cat_filter != "الكل":
-            display_mcq = display_mcq[display_mcq["category"] == cat_filter]
-        if diff_filter != "الكل":
-            display_mcq = display_mcq[display_mcq["difficulty"] == diff_filter]
-
-        with st.form("mcq_form"):
-            answers = {}
-            for _, q in display_mcq.iterrows():
-                st.markdown(f"**{int(q['id'])}. {q['question_ar']}** &nbsp; <span class='box-badge' style='background:#d4af37;color:#0f1b2d'>{q['difficulty']}</span>", unsafe_allow_html=True)
-                if str(q["question_ru"]).strip():
-                    st.caption(f"🇷🇺 {q['question_ru']}")
-                options = {"A": q["option_a"], "B": q["option_b"], "C": q["option_c"], "D": q["option_d"]}
-                choice = st.radio("اختر إجابة واحدة:", list(options.keys()), format_func=lambda k, o=options: f"{k}) {o}",
-                                   key=f"mcq_{q['id']}", label_visibility="visible")
-                answers[q["id"]] = choice
-                st.markdown("---")
-            submitted = st.form_submit_button("📤 تسليم الاختبار", type="primary")
-
-        if submitted and len(display_mcq) > 0:
-            correct = sum(1 for _, q in display_mcq.iterrows() if answers[q["id"]] == q["correct_answer"])
-            pct = round(correct / len(display_mcq) * 100, 1)
-            st.success(f"🎯 نتيجتك: {correct} / {len(display_mcq)} ({pct}%)")
-            with st.expander("📋 مراجعة الإجابات والشروحات"):
-                for _, q in display_mcq.iterrows():
-                    is_correct = answers[q["id"]] == q["correct_answer"]
-                    icon = "✅" if is_correct else "❌"
-                    st.markdown(f"{icon} **{q['question_ar']}** — الإجابة الصحيحة: {q['correct_answer']}")
-                    st.caption(q["explanation_ar"])
-
-    elif mode == "🎲 ولّد أسئلة جديدة بالذكاء الاصطناعي":
-        st.markdown("##### 🎲 مولّد الأسئلة الذكي — محتوى جديد كل مرة")
-        st.caption("اكتب أي موضوع دبلوماسي أو سياسي، وسيولّد الذكاء الاصطناعي أسئلة اختيار من متعدد أصلية وجديدة حوله — لا تكرار، ولا اقتصار على بنك أسئلة ثابت.")
-
-        if not st.session_state.api_key:
-            st.warning("🔑 هذه الميزة تتطلب مفتاح Gemini API المجاني — أضفه في الشريط الجانبي لتفعيلها.")
-        else:
-            gen_col1, gen_col2 = st.columns([3, 1])
-            with gen_col1:
-                gen_topic = st.text_input("الموضوع", placeholder="مثال: العقوبات على روسيا، الأمن السيبراني الدولي، منظمة بريكس")
-            with gen_col2:
-                gen_count = st.selectbox("عدد الأسئلة", [3, 4, 5, 6], index=1)
-
-            if st.button("✨ ولّد الأسئلة الآن", type="primary"):
-                if gen_topic.strip():
-                    with st.spinner("جارٍ توليد أسئلة جديدة حصرياً حول هذا الموضوع..."):
-                        st.session_state.generated_questions = generate_ai_questions(gen_topic.strip(), st.session_state.api_key, n=gen_count)
-                        st.session_state.generated_answers = {}
-                else:
-                    st.warning("يرجى كتابة موضوع أولاً.")
-
-            if st.session_state.get("generated_questions"):
-                gq = st.session_state.generated_questions
-                if gq and "error" in gq[0]:
-                    st.error(gq[0]["error"])
-                else:
-                    with st.form("generated_quiz_form"):
-                        for i, q in enumerate(gq):
-                            st.markdown(f"**{i+1}. {q.get('question', '')}**")
-                            opts = {"A": q.get("option_a", ""), "B": q.get("option_b", ""), "C": q.get("option_c", ""), "D": q.get("option_d", "")}
-                            sel = st.radio("اختر إجابة واحدة:", list(opts.keys()), format_func=lambda k, o=opts: f"{k}) {o}",
-                                           key=f"gen_q_{i}", label_visibility="visible")
-                            st.session_state.generated_answers[i] = sel
-                            st.markdown("---")
-                        gen_submit = st.form_submit_button("📤 تسليم", type="primary")
-
-                    if gen_submit:
-                        correct_count = sum(1 for i, q in enumerate(gq) if st.session_state.generated_answers.get(i) == q.get("correct"))
-                        st.success(f"🎯 نتيجتك: {correct_count} / {len(gq)}")
-                        with st.expander("📋 مراجعة الإجابات والشروحات"):
-                            for i, q in enumerate(gq):
-                                is_correct = st.session_state.generated_answers.get(i) == q.get("correct")
-                                icon = "✅" if is_correct else "❌"
-                                st.markdown(f"{icon} **{q.get('question','')}** — الإجابة الصحيحة: {q.get('correct','')}")
-                                st.caption(q.get("explanation", ""))
-
-    elif mode == "وضع الاختبار المحاكي بالوقت":
-        st.markdown("##### ⏱️ اختبار محاكي لظروف الامتحان الحقيقية")
-        st.caption("اختر مدة زمنية، ثم أجب عن أكبر عدد ممكن من الأسئلة قبل انتهاء الوقت — تماماً كظروف الامتحان الفعلي.")
-
-        exam_time_col1, exam_time_col2 = st.columns([1, 2])
-        with exam_time_col1:
-            timed_minutes = st.selectbox("مدة الاختبار (دقيقة)", [5, 10, 15, 20], index=1, key="timed_exam_minutes")
-            start_timed_exam = st.button("▶️ ابدأ الاختبار المحاكي")
-        with exam_time_col2:
-            if start_timed_exam:
-                st.session_state.timed_exam_active = True
-            if st.session_state.get("timed_exam_active"):
-                render_countdown_timer(timed_minutes, key_suffix="exam")
-
-        if st.session_state.get("timed_exam_active"):
-            sample_size = min(8, len(mcq_df))
-            if "timed_exam_questions" not in st.session_state:
-                st.session_state.timed_exam_questions = mcq_df.sample(sample_size).reset_index(drop=True)
-
-            with st.form("timed_exam_form"):
-                timed_answers = {}
-                for _, q in st.session_state.timed_exam_questions.iterrows():
-                    st.markdown(f"**{q['question_ar']}**")
-                    options = {"A": q["option_a"], "B": q["option_b"], "C": q["option_c"], "D": q["option_d"]}
-                    choice = st.radio("اختر إجابة واحدة:", list(options.keys()), format_func=lambda k, o=options: f"{k}) {o}",
-                                       key=f"timed_{q['id']}", label_visibility="visible")
-                    timed_answers[q["id"]] = choice
-                    st.markdown("---")
-                timed_submit = st.form_submit_button("📤 تسليم الاختبار المحاكي", type="primary")
-
-            if timed_submit:
-                correct = sum(1 for _, q in st.session_state.timed_exam_questions.iterrows() if timed_answers[q["id"]] == q["correct_answer"])
-                total_q = len(st.session_state.timed_exam_questions)
-                pct = round(correct / total_q * 100, 1)
-                st.success(f"🏁 انتهى الاختبار! نتيجتك: {correct} / {total_q} ({pct}%)")
-                del st.session_state.timed_exam_questions
-                st.session_state.timed_exam_active = False
-
-    else:
-        for _, q in essays_df.iterrows():
-            st.markdown(f"**سؤال {int(q['id'])}:** {q['question_ar']}")
-            essay_answer = st.text_area("اكتب إجابتك هنا:", height=180, key=f"essay_{q['id']}")
-            ewc = len(essay_answer.split()) if essay_answer.strip() else 0
-            st.caption(f"📝 عدد الكلمات: {ewc}")
-            with st.expander("🧭 معايير التقييم"):
-                st.caption(q["explanation_ar"])
-            st.markdown("---")
-        st.info("💡 نصيحة: يمكنك لصق إجابتك في «استوديو الترجمة» كترجمة لتقييم جودة لغتك الروسية إن رغبت.")
-
-# ============================================================================
-# التبويب 4: مرجع المعاهدات والمنظمات
-# ============================================================================
-with tab4:
-    st.subheader("🏛️ مرجع المعاهدات والمنظمات الدولية")
-    st.caption("بطاقات ملخصة لأهم المعاهدات والمنظمات الدولية والإقليمية ذات الصلة بامتحان السلك الدبلوماسي.")
-
-    tcol1, tcol2 = st.columns(2)
-    with tcol1:
-        treaty_type_filter = st.selectbox("نوع الكيان", ["الكل"] + sorted(treaties_df["category"].unique().tolist()))
-    with tcol2:
-        treaty_search = st.text_input("🔍 بحث في المعاهدات والمنظمات")
-
-    filtered_treaties = treaties_df.copy()
-    if treaty_type_filter != "الكل":
-        filtered_treaties = filtered_treaties[filtered_treaties["category"] == treaty_type_filter]
-    if treaty_search:
-        mask = filtered_treaties.apply(
-            lambda r: treaty_search.lower() in str(r["name_ar"]).lower()
-            or treaty_search.lower() in str(r["name_en"]).lower()
-            or treaty_search.lower() in str(r["name_ru"]).lower(), axis=1)
-        filtered_treaties = filtered_treaties[mask]
-
-    st.caption(f"عدد النتائج: {len(filtered_treaties)}")
-
-    for _, t in filtered_treaties.iterrows():
-        points_html = "".join([f"<li>{p}</li>" for p in t["key_points"]])
-        card = f"""
-        <div class="treaty-card">
-            <h4>🏛️ {t['name_ar']} <span class="box-badge" style="background:#d4af37;color:#0f1b2d;">{t['year']}</span></h4>
-            <p style="opacity:0.75;font-size:13px;margin-bottom:6px;">{t['name_en']} — {t['name_ru']}</p>
-            <p><b>النوع:</b> {t['type']}</p>
-            <p>{t['summary_ar']}</p>
-            <b>أبرز النقاط:</b>
-            <ul>{points_html}</ul>
-            <a href="{t['website']}" target="_blank" style="color:#d4af37;">🔗 الموقع الرسمي</a>
-        </div>
-        """
-        st.markdown(card, unsafe_allow_html=True)
-
-    st.markdown("---")
-    st.subheader("✨ لم تجد المعاهدة أو المنظمة التي تبحث عنها؟ ولّدها الآن")
-    st.caption("اكتب اسم أي معاهدة أو منظمة دولية غير موجودة في القائمة أعلاه، وسيولّد Gemini بطاقة معلومات عنها فوراً.")
-
-    if not st.session_state.api_key:
-        st.info("🔑 أضف مفتاح Gemini API المجاني في الشريط الجانبي لتفعيل هذه الميزة.")
-    else:
-        new_treaty_name = st.text_input("اسم المعاهدة أو المنظمة", placeholder="مثال: معاهدة أستانا، منظمة الدول الأمريكية، اتفاقية سيفر")
-        if st.button("✨ ولّد بطاقة معلومات"):
-            if new_treaty_name.strip():
-                with st.spinner("جارٍ توليد بطاقة المعلومات..."):
-                    card_data = generate_ai_treaty_card(new_treaty_name.strip(), st.session_state.api_key)
-                if "error" in card_data:
-                    st.error(card_data["error"])
-                else:
-                    points_html = "".join([f"<li>{p}</li>" for p in card_data.get("key_points", [])])
-                    generated_card_html = f"""
-                    <div class="treaty-card">
-                        <h4>✨ {card_data.get('name_ar','')} <span class="box-badge" style="background:#d4af37;color:#0f1b2d;">{card_data.get('year','?')}</span></h4>
-                        <p style="opacity:0.75;font-size:13px;margin-bottom:6px;">{card_data.get('name_en','')} — {card_data.get('name_ru','')}</p>
-                        <p><b>النوع:</b> {card_data.get('type','')}</p>
-                        <p>{card_data.get('summary_ar','')}</p>
-                        <b>أبرز النقاط:</b>
-                        <ul>{points_html}</ul>
-                    </div>
-                    """
-                    st.markdown(generated_card_html, unsafe_allow_html=True)
-                    st.caption("⚠️ محتوى مولَّد بالذكاء الاصطناعي — يُنصح بالتحقق من الدقة التاريخية والتفاصيل الرقمية قبل الاعتماد عليها في الامتحان.")
-            else:
-                st.warning("يرجى كتابة اسم أولاً.")
-
-# ============================================================================
-# التبويب 5: الأخبار الدبلوماسية اليومية (مصدر خارجي حي + شرح)
-# ============================================================================
-with tab5:
-    st.subheader("📰 الأخبار الدبلوماسية والسياسية اليومية")
-    st.caption(
-        "أخبار حيّة ومتجددة من أكثر من مصدر إخباري مصري مستقل (اليوم السابع + مصراوي) — "
-        "بما في ذلك قسم مخصص للشؤون الدبلوماسية والدولية، مع تحليل ذكي لدلالتها."
-    )
-
-    selected_sources = st.multiselect(
-        "اختر مصدراً واحداً أو أكثر:", list(NEWS_SOURCES.keys()),
-        default=["🕊️ مصراوي — شؤون عربية ودولية (دبلوماسي)", "🏛️ اليوم السابع — سياسة"],
-    )
-    news_limit = st.slider("عدد الأخبار من كل مصدر", 2, 8, 4)
-    refresh_news = st.button("🔄 تحديث الأخبار الآن")
-
-    if not selected_sources:
-        st.warning("يرجى اختيار مصدر واحد على الأقل.")
-    else:
-        news_cache_key = "news_cache_" + "_".join(sorted(selected_sources))
-        if refresh_news or news_cache_key not in st.session_state:
-            with st.spinner("جارٍ جلب آخر الأخبار من كل المصادر المختارة..."):
-                combined_items = []
-                for src_name in selected_sources:
-                    fetched = fetch_diplomatic_news(NEWS_SOURCES[src_name], limit=news_limit)
-                    for it in fetched:
-                        if "error" not in it:
-                            it["source_label"] = src_name
-                    combined_items.extend(fetched)
-                st.session_state[news_cache_key] = combined_items
-
-        news_items = st.session_state.get(news_cache_key, [])
-        valid_items = [it for it in news_items if "error" not in it]
-        error_items = [it for it in news_items if "error" in it]
-
-        for err in error_items:
-            st.warning(err["error"])
-
-        if not valid_items:
-            st.info("لا توجد أخبار لعرضها حالياً من المصادر المختارة.")
-        else:
-            for idx, item in enumerate(valid_items):
-                card = f"""
-                <div class="news-card">
-                    <h5>📌 {item['title']}</h5>
-                    <p class="news-date">🗓️ {item['date']} &nbsp;|&nbsp; 📡 {item.get('source_label', '')}</p>
-                    <p>{item['description']}</p>
-                    <a href="{item['link']}" target="_blank">🔗 قراءة التفاصيل الكاملة من المصدر</a>
-                </div>
-                """
-                st.markdown(card, unsafe_allow_html=True)
-
-                if st.session_state.api_key:
-                    nc1, nc2 = st.columns(2)
-                    with nc1:
-                        if st.button("🧠 اشرح لي الدلالة الدبلوماسية", key=f"explain_news_{idx}"):
-                            with st.spinner("جارٍ التحليل..."):
-                                prompt = (
-                                    "أنت أستاذ علاقات دولية يشرح لطالب يستعد لامتحان السلك الدبلوماسي. "
-                                    f"اشرح بإيجاز (100-130 كلمة) الدلالة الدبلوماسية والسياسية لهذا الخبر، "
-                                    "واذكر أي مصطلحات أو مفاهيم دبلوماسية ذات صلة قد تُطرح في الامتحان:\n\n"
-                                    f"العنوان: {item['title']}\nالوصف: {item['description']}"
-                                )
-                                explanation = call_gemini(prompt, st.session_state.api_key, max_tokens=400)
-                                st.info(explanation)
-                    with nc2:
-                        if st.button("🎯 حوّل هذا الخبر إلى سؤال اختبار", key=f"quiz_news_{idx}"):
-                            with st.spinner("جارٍ توليد سؤال من الخبر..."):
-                                try:
-                                    news_topic = f"{item['title']} — {item['description']}"
-                                    generated = generate_ai_questions(news_topic, st.session_state.api_key, n=1)
-                                    if generated and "error" not in generated[0]:
-                                        gq = generated[0]
-                                        st.markdown(f"**{gq.get('question','')}**")
-                                        for opt_key in ["A", "B", "C", "D"]:
-                                            st.write(f"{opt_key}) {gq.get(f'option_{opt_key.lower()}', '')}")
-                                        with st.expander("✅ عرض الإجابة الصحيحة"):
-                                            st.write(f"الإجابة: {gq.get('correct','')} — {gq.get('explanation','')}")
-                                    else:
-                                        st.error(generated[0].get("error", "تعذّر التوليد."))
-                                except Exception as e:
-                                    st.error(f"تعذّر توليد السؤال: {e}")
-                else:
-                    st.caption("🔑 أضف مفتاح Gemini API المجاني في الشريط الجانبي لتفعيل ميزات الشرح الذكي وتوليد الأسئلة من الأخبار.")
-                st.markdown("---")
-
-    st.info("💡 نصيحة: تابع هذا القسم يومياً — أسئلة الامتحان الشفوي غالباً ما تتطرق لأحداث دولية جارية.")
-
-# ============================================================================
-# التبويب 6: لوحة التقدم
-# ============================================================================
-with tab6:
-    st.subheader("🏆 لوحة متابعة تقدمك")
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.markdown(f"<div class='metric-card'><h1>{mastered}</h1><p>مصطلح متقن تماماً ✅</p></div>", unsafe_allow_html=True)
-    with c2:
-        acc = round(st.session_state.quiz_score / st.session_state.quiz_total * 100, 1) if st.session_state.quiz_total else 0
-        st.markdown(f"<div class='metric-card'><h1>{acc}%</h1><p>دقة الاختبارات الذاتية 🎯</p></div>", unsafe_allow_html=True)
-    with c3:
-        avg_trans = (round(sum(h["score"] for h in st.session_state.translation_history) / len(st.session_state.translation_history), 1)
-                     if st.session_state.translation_history else 0)
-        st.markdown(f"<div class='metric-card'><h1>{avg_trans}</h1><p>متوسط درجات الترجمة 🌐</p></div>", unsafe_allow_html=True)
-
-    st.markdown("---")
-    st.markdown("### 📦 توزيع المصطلحات على صناديق Leitner")
-    box_counts = pd.Series(st.session_state.leitner_boxes.values()).value_counts().sort_index()
-    box_df = pd.DataFrame({
-        "الصندوق": [f"{i} — {BOX_LABELS[i]}" for i in box_counts.index],
-        "عدد المصطلحات": box_counts.values,
-    })
-    st.bar_chart(box_df, x="الصندوق", y="عدد المصطلحات")
-
-    st.markdown("---")
-    if st.session_state.translation_history:
-        st.markdown("### 📈 تطور درجات الترجمة عبر الزمن")
-        hist_df = pd.DataFrame(st.session_state.translation_history)
-        st.line_chart(hist_df, x="date", y="score")
-        st.dataframe(hist_df, use_container_width=True, hide_index=True)
-    else:
-        st.info("لم تُقيّم أي ترجمة بعد. توجّه إلى «استوديو الترجمة» للبدء.")
-
-    weak_terms = [t for t, b in st.session_state.leitner_boxes.items() if b <= 2]
-    if weak_terms:
-        st.markdown("### 🔁 مصطلحات بحاجة لمراجعة عاجلة")
-        for t in sorted(weak_terms):
-            st.markdown(f"- {t}")
-
-    st.markdown("---")
-    st.markdown("### 🎯 نصيحة اليوم")
-    tips = [
-        "راجع 5 مصطلحات جديدة يومياً بدلاً من 30 مصطلحاً مرة واحدة — التكرار المتباعد أفعل للحفظ.",
-        "عند الترجمة الدبلوماسية، حافظ على درجة الرسمية نفسها في اللغة الهدف، لا تُبسّط الأسلوب.",
-        "استخدم عداد الوقت في استوديو الترجمة لتعتاد ضغط الامتحان الحقيقي قبل يوم الاختبار.",
-        "تدرّب على الترجمة الفورية الذهنية: اقرأ جملة وترجمها شفهياً خلال 10 ثوانٍ.",
-        "لا تتجاهل صندوق Leitner الأول — هو مؤشرك الحقيقي لنقاط الضعف قبل الامتحان.",
-        "راجع بطاقات مرجع المعاهدات دورياً — أسئلة السنوات والمواد القانونية شائعة في الامتحانات.",
-    ]
-    st.success(random.choice(tips))# -*- coding: utf-8 -*-
-"""
-app.py — بوابة الإعداد لامتحان السلك الدبلوماسي (النسخة الشاملة الموسّعة)
-تركيز خاص: اللغة الروسية والترجمة الدبلوماسية
-================================================================================
-ملف واحد ذاتي الاكتفاء (Self-Contained) — لا استيرادات محلية، يعمل مباشرة على
-Streamlit Community Cloud بلا مشاكل ModuleNotFoundError.
-
-الأقسام الخمسة:
-  1) 📖 المعجم الثلاثي اللغة + بطاقات Leitner + بحث حي في ويكيبيديا (مصدر خارجي)
-  2) 🎓 استوديو الترجمة والمقالات: عداد زمني حقيقي (JS) + عداد كلمات حي +
-     تقييم ذكي ثلاثي اللغة + نماذج مقالات سياسية وتحليلية للمراجعة
-  3) 📝 بنك الأسئلة والاختبارات التفاعلية (MCQ مصنّفة + مقالية + وضع الاختبار المحاكي بالوقت)
-  4) 🏛️ مرجع المعاهدات والمنظمات الدولية (بطاقات ملخصة)
-  5) 🏆 لوحة التقدم الشاملة
-"""
-
-import re
-import io
-import json
-import math
-import random
-import difflib
-from collections import Counter
-from dataclasses import dataclass, field
-from datetime import datetime
-
-import pandas as pd
-import streamlit as st
-import streamlit.components.v1 as components
-
-try:
-    import requests
-except ImportError:
-    requests = None
-
-# ============================================================================
-# 1) البيانات المضمّنة — المعجم (موسّع، مع مصدر لكل مصطلح)
-# ============================================================================
-
-GLOSSARY = [
-    {"term_ar": "السيادة الوطنية", "term_en": "National Sovereignty", "term_ru": "Национальный суверенитет", "category": "سياسي", "definition_ar": "حق الدولة في ممارسة سلطتها الكاملة على إقليمها دون تدخل خارجي", "source": "ميثاق الأمم المتحدة، المادة 2(1)"},
-    {"term_ar": "حق النقض (الفيتو)", "term_en": "Veto Power", "term_ru": "Право вето", "category": "سياسي", "definition_ar": "صلاحية تمنح لعضو دائم في مجلس الأمن لإسقاط أي قرار غير إجرائي", "source": "ميثاق الأمم المتحدة، المادة 27(3)"},
-    {"term_ar": "اتفاقية فيينا للعلاقات الدبلوماسية", "term_en": "Vienna Convention on Diplomatic Relations", "term_ru": "Венская конвенция о дипломатических сношениях", "category": "قانوني", "definition_ar": "معاهدة دولية لعام 1961 تنظم العلاقات الدبلوماسية بين الدول", "source": "الأمم المتحدة — مجموعة المعاهدات 1961"},
-    {"term_ar": "الحصانة الدبلوماسية", "term_en": "Diplomatic Immunity", "term_ru": "Дипломатический иммунитет", "category": "قانوني", "definition_ar": "حماية قانونية تمنح للدبلوماسيين من الملاحقة القضائية في الدولة المضيفة", "source": "اتفاقية فيينا 1961، المواد 29-31"},
-    {"term_ar": "شخصية غير مرغوب فيها", "term_en": "Persona Non Grata", "term_ru": "Персона нон грата", "category": "قانوني", "definition_ar": "مصطلح يشير إلى دبلوماسي مرفوض من قبل الدولة المضيفة", "source": "اتفاقية فيينا 1961، المادة 9"},
-    {"term_ar": "مذكرة تفاهم", "term_en": "Memorandum of Understanding", "term_ru": "Меморандум о взаимопонимании", "category": "قانوني", "definition_ar": "وثيقة تعبر عن اتفاق مبدئي غير ملزم قانونياً بين طرفين", "source": "الممارسة الدبلوماسية العرفية"},
-    {"term_ar": "العقوبات الاقتصادية", "term_en": "Economic Sanctions", "term_ru": "Экономические санкции", "category": "اقتصادي", "definition_ar": "تدابير تقييدية تفرضها دولة أو منظمة على دولة أخرى", "source": "ميثاق الأمم المتحدة، الفصل السابع"},
-    {"term_ar": "التعريفة الجمركية", "term_en": "Customs Tariff", "term_ru": "Таможенный тариф", "category": "اقتصادي", "definition_ar": "ضريبة تفرض على السلع المستوردة أو المصدرة", "source": "منظمة التجارة العالمية WTO"},
-    {"term_ar": "ميزان المدفوعات", "term_en": "Balance of Payments", "term_ru": "Платёжный баланс", "category": "اقتصادي", "definition_ar": "سجل لجميع المعاملات الاقتصادية بين دولة وبقية العالم", "source": "صندوق النقد الدولي IMF"},
-    {"term_ar": "منظمة التجارة العالمية", "term_en": "World Trade Organization", "term_ru": "Всемирная торговая организация", "category": "اقتصادي", "definition_ar": "منظمة دولية تنظم التجارة بين الدول", "source": "wto.org"},
-    {"term_ar": "القرار الأممي", "term_en": "UN Resolution", "term_ru": "Резолюция ООН", "category": "سياسي", "definition_ar": "قرار صادر عن هيئة تابعة للأمم المتحدة", "source": "un.org"},
-    {"term_ar": "الوساطة الدبلوماسية", "term_en": "Diplomatic Mediation", "term_ru": "Дипломатическое посредничество", "category": "سياسي", "definition_ar": "تدخل طرف ثالث لتسهيل التفاوض بين طرفين متنازعين", "source": "الممارسة الدبلوماسية العرفية"},
-    {"term_ar": "التصعيد العسكري", "term_en": "Military Escalation", "term_ru": "Военная эскалация", "category": "سياسي", "definition_ar": "تصاعد حدة النزاع نحو استخدام القوة العسكرية", "source": "أدبيات العلاقات الدولية"},
-    {"term_ar": "وقف إطلاق النار", "term_en": "Ceasefire", "term_ru": "Прекращение огня", "category": "سياسي", "definition_ar": "اتفاق مؤقت لوقف الأعمال القتالية", "source": "أدبيات القانون الدولي الإنساني"},
-    {"term_ar": "المفوضية السامية لشؤون اللاجئين", "term_en": "UNHCR", "term_ru": "Верховный комиссар ООН по делам беженцев", "category": "قانوني", "definition_ar": "وكالة أممية تعنى بحماية اللاجئين", "source": "unhcr.org"},
-    {"term_ar": "اعتماد أوراق السفير", "term_en": "Presentation of Credentials", "term_ru": "Вручение верительных грамот", "category": "دبلوماسي", "definition_ar": "مراسم تقديم السفير أوراق اعتماده لرئيس الدولة المضيفة", "source": "اتفاقية فيينا 1961، المادة 13"},
-    {"term_ar": "القمة الثنائية", "term_en": "Bilateral Summit", "term_ru": "Двусторонний саммит", "category": "دبلوماسي", "definition_ar": "لقاء رفيع المستوى بين ممثلي دولتين", "source": "الممارسة الدبلوماسية"},
-    {"term_ar": "التعددية القطبية", "term_en": "Multipolarity", "term_ru": "Многополярность", "category": "سياسي", "definition_ar": "نظام دولي يتوزع فيه النفوذ على عدة أقطاب قوة", "source": "أدبيات العلاقات الدولية المعاصرة"},
-    {"term_ar": "حزام الأمن الإقليمي", "term_en": "Regional Security Belt", "term_ru": "Пояс региональной безопасности", "category": "سياسي", "definition_ar": "ترتيبات أمنية جماعية بين دول متجاورة", "source": "أدبيات الأمن الإقليمي"},
-    {"term_ar": "الدبلوماسية الوقائية", "term_en": "Preventive Diplomacy", "term_ru": "Превентивная дипломатия", "category": "سياسي", "definition_ar": "إجراءات لمنع نشوب النزاعات قبل تفاقمها", "source": "تقرير 'أجندة للسلام' — الأمم المتحدة 1992"},
-    {"term_ar": "التطبيع الدبلوماسي", "term_en": "Diplomatic Normalization", "term_ru": "Дипломатическая нормализация", "category": "دبلوماسي", "definition_ar": "استعادة العلاقات الرسمية الكاملة بين دولتين بعد قطيعة", "source": "الممارسة الدبلوماسية العرفية"},
-    {"term_ar": "الملحق العسكري", "term_en": "Military Attaché", "term_ru": "Военный атташе", "category": "دبلوماسي", "definition_ar": "ضابط عسكري يمثل بلاده في بعثة دبلوماسية", "source": "اتفاقية فيينا 1961"},
-    {"term_ar": "التفاوض متعدد الأطراف", "term_en": "Multilateral Negotiation", "term_ru": "Многосторонние переговоры", "category": "سياسي", "definition_ar": "مفاوضات تشارك فيها أكثر من دولتين لتسوية قضية مشتركة", "source": "أدبيات الدبلوماسية متعددة الأطراف"},
-    {"term_ar": "الاعتراف الدبلوماسي", "term_en": "Diplomatic Recognition", "term_ru": "Дипломатическое признание", "category": "قانوني", "definition_ar": "إقرار رسمي من دولة بشرعية كيان سياسي آخر ككيان دولي", "source": "القانون الدولي العام"},
-    {"term_ar": "الحياد الدبلوماسي", "term_en": "Diplomatic Neutrality", "term_ru": "Дипломатический нейтралитет", "category": "سياسي", "definition_ar": "امتناع دولة عن الانحياز لأي طرف في نزاع دولي", "source": "اتفاقية لاهاي 1907 للحياد"},
-    {"term_ar": "المرسوم التنفيذي", "term_en": "Executive Order", "term_ru": "Указ", "category": "قانوني", "definition_ar": "أمر رسمي يصدره رئيس الدولة له قوة القانون", "source": "القانون الدستوري المقارن"},
-    {"term_ar": "خط الاتصال الساخن", "term_en": "Hotline", "term_ru": "Горячая линия", "category": "أمني", "definition_ar": "قناة اتصال مباشرة بين قادة الدول لإدارة الأزمات وتجنب سوء الفهم", "source": "اتفاقية الخط الساخن السوفيتية-الأمريكية 1963"},
-    {"term_ar": "نزع السلاح", "term_en": "Disarmament", "term_ru": "Разоружение", "category": "أمني", "definition_ar": "خفض أو إزالة القدرات العسكرية والتسليحية لدولة أو مجموعة دول", "source": "مكتب الأمم المتحدة لشؤون نزع السلاح UNODA"},
-    {"term_ar": "معاهدة عدم انتشار الأسلحة النووية", "term_en": "Non-Proliferation Treaty (NPT)", "term_ru": "Договор о нераспространении ядерного оружия", "category": "أمني", "definition_ar": "معاهدة دولية لعام 1968 تهدف لمنع انتشار الأسلحة والتقنية النووية", "source": "iaea.org"},
-    {"term_ar": "الأمن الجماعي", "term_en": "Collective Security", "term_ru": "Коллективная безопасность", "category": "أمني", "definition_ar": "نظام يلتزم فيه أعضاء مجموعة دول بالدفاع المشترك عن أي عضو يتعرض لعدوان", "source": "ميثاق الأمم المتحدة، الفصل الثامن"},
-    {"term_ar": "الوثيقة الختامية", "term_en": "Final Communiqué", "term_ru": "Итоговое коммюнике", "category": "دبلوماسي", "definition_ar": "بيان رسمي يصدر في ختام مؤتمر أو قمة دولية يلخص نتائجها", "source": "الممارسة الدبلوماسية العرفية"},
-    {"term_ar": "القانون الدولي الإنساني", "term_en": "International Humanitarian Law", "term_ru": "Международное гуманитарное право", "category": "قانوني", "definition_ar": "مجموعة قواعد تحمي الأشخاص غير المشاركين في الأعمال العدائية وقت النزاع", "source": "اتفاقيات جنيف 1949"},
-    {"term_ar": "اللجوء السياسي", "term_en": "Political Asylum", "term_ru": "Политическое убежище", "category": "قانوني", "definition_ar": "حماية تمنحها دولة لشخص يتعرض للاضطهاد في بلده الأصلي", "source": "اتفاقية جنيف للاجئين 1951"},
-    {"term_ar": "الدبلوماسية الشعبية", "term_en": "Public Diplomacy", "term_ru": "Публичная дипломатия", "category": "دبلوماسي", "definition_ar": "جهود دولة للتواصل المباشر مع شعوب وجمهور دول أخرى لتحسين صورتها", "source": "أدبيات الاتصال الدولي"},
-    {"term_ar": "القوة الناعمة", "term_en": "Soft Power", "term_ru": "Мягкая сила", "category": "سياسي", "definition_ar": "قدرة الدولة على التأثير عبر الجاذبية الثقافية والقيمية لا الإكراه", "source": "جوزيف ناي، 1990"},
-    {"term_ar": "الدبلوماسية الاقتصادية", "term_en": "Economic Diplomacy", "term_ru": "Экономическая дипломатия", "category": "اقتصادي", "definition_ar": "استخدام الأدوات الاقتصادية لتحقيق أهداف السياسة الخارجية", "source": "أدبيات الاقتصاد السياسي الدولي"},
-    {"term_ar": "منطقة التجارة الحرة", "term_en": "Free Trade Area", "term_ru": "Зона свободной торговли", "category": "اقتصادي", "definition_ar": "اتفاق بين دول لإلغاء الرسوم الجمركية بينها على السلع والخدمات", "source": "منظمة التجارة العالمية WTO"},
-    {"term_ar": "الاستثمار الأجنبي المباشر", "term_en": "Foreign Direct Investment (FDI)", "term_ru": "Прямые иностранные инвестиции", "category": "اقتصادي", "definition_ar": "استثمار شركة أو فرد من دولة في أصول إنتاجية بدولة أخرى", "source": "الأونكتاد UNCTAD"},
-    {"term_ar": "الوفد الدبلوماسي", "term_en": "Diplomatic Delegation", "term_ru": "Дипломатическая делегация", "category": "دبلوماسي", "definition_ar": "مجموعة ممثلين رسميين يمثلون دولة في محفل أو مفاوضات دولية", "source": "اتفاقية فيينا 1961"},
-    {"term_ar": "البروتوكول الدبلوماسي", "term_en": "Diplomatic Protocol", "term_ru": "Дипломатический протокол", "category": "دبلوماسي", "definition_ar": "مجموعة القواعد والأعراف التي تنظم المراسم الرسمية بين الدول", "source": "الممارسة الدبلوماسية العرفية"},
-    {"term_ar": "النقض الجزئي", "term_en": "Reservation (Treaty Law)", "term_ru": "Оговорка к договору", "category": "قانوني", "definition_ar": "إعلان دولة استبعاد أو تعديل أثر بعض أحكام معاهدة عند التصديق عليها", "source": "اتفاقية فيينا لقانون المعاهدات 1969"},
-    {"term_ar": "التصديق على المعاهدة", "term_en": "Ratification", "term_ru": "Ратификация", "category": "قانوني", "definition_ar": "الإجراء الرسمي الذي تُقر به دولة التزامها بمعاهدة وقّعت عليها", "source": "اتفاقية فيينا لقانون المعاهدات 1969، المادة 2"},
-    {"term_ar": "التحكيم الدولي", "term_en": "International Arbitration", "term_ru": "Международный арбитраж", "category": "قانوني", "definition_ar": "آلية لتسوية النزاعات بين الدول عبر طرف محايد يصدر قراراً ملزماً", "source": "محكمة التحكيم الدائمة، لاهاي"},
-    {"term_ar": "الجزاءات الأحادية", "term_en": "Unilateral Sanctions", "term_ru": "Односторонние санкции", "category": "اقتصادي", "definition_ar": "عقوبات تفرضها دولة منفردة دون تفويض من مجلس الأمن", "source": "أدبيات القانون الدولي الاقتصادي"},
-    {"term_ar": "التعاون الجنوب-جنوب", "term_en": "South-South Cooperation", "term_ru": "Сотрудничество Юг–Юг", "category": "اقتصادي", "definition_ar": "تعاون تنموي بين دول نامية دون وساطة الدول المتقدمة", "source": "الأمم المتحدة — مكتب التعاون الجنوب-جنوب"},
-    {"term_ar": "منظمة شنغهاي للتعاون", "term_en": "Shanghai Cooperation Organisation", "term_ru": "Шанхайская организация сотрудничества", "category": "دبلوماسي", "definition_ar": "منظمة إقليمية أوراسية للتعاون الأمني والاقتصادي تضم روسيا والصين ودولاً أخرى", "source": "sectsco.org"},
-    {"term_ar": "الفراغ الاستراتيجي", "term_en": "Strategic Vacuum", "term_ru": "Стратегический вакуум", "category": "سياسي", "definition_ar": "غياب قوة مهيمنة في منطقة ما يفتح الباب أمام تنافس قوى أخرى لملء النفوذ", "source": "أدبيات الجيوسياسة"},
-    {"term_ar": "ميزان القوى", "term_en": "Balance of Power", "term_ru": "Баланс сил", "category": "سياسي", "definition_ar": "توزيع القوة بين الدول بحيث لا تهيمن دولة واحدة على النظام الدولي", "source": "أدبيات الواقعية في العلاقات الدولية"},
-    {"term_ar": "الدبلوماسية المكوكية", "term_en": "Shuttle Diplomacy", "term_ru": "Челночная дипломатия", "category": "دبلوماسي", "definition_ar": "تنقل وسيط بين أطراف نزاع لتقريب وجهات النظر دون جمعهم في مكان واحد", "source": "مصطلح ارتبط بدبلوماسية هنري كيسنجر 1973"},
-    {"term_ar": "الأمن السيبراني", "term_en": "Cybersecurity", "term_ru": "Кибербезопасность", "category": "أمني", "definition_ar": "حماية الأنظمة والشبكات الرقمية للدول من الهجمات والتجسس الإلكتروني", "source": "الاتحاد الدولي للاتصالات ITU"},
-]
-
-# ============================================================================
-# 2) مرجع المعاهدات والمنظمات الدولية
-# ============================================================================
-
-TREATIES_ORGS = [
-    {"name_ar": "ميثاق الأمم المتحدة", "name_en": "UN Charter", "name_ru": "Устав ООН", "year": "1945", "type": "معاهدة تأسيسية",
-     "summary_ar": "الوثيقة التأسيسية للأمم المتحدة، تحدد مبادئ العلاقات الدولية وآليات حفظ السلم والأمن الدوليين.",
-     "key_points": ["يتكون من 19 فصلاً و111 مادة", "أنشأ ست هيئات رئيسية أبرزها الجمعية العامة ومجلس الأمن", "المادة 2(4) تحظر استخدام القوة بين الدول"],
-     "website": "https://www.un.org/en/about-us/un-charter", "category": "أممي"},
-    {"name_ar": "اتفاقية فيينا للعلاقات الدبلوماسية", "name_en": "Vienna Convention on Diplomatic Relations", "name_ru": "Венская конвенция о дипломатических сношениях", "year": "1961", "type": "معاهدة",
-     "summary_ar": "تنظم إنشاء البعثات الدبلوماسية وتحدد الامتيازات والحصانات الممنوحة للدبلوماسيين.",
-     "key_points": ["حصانة قضائية كاملة للمبعوث الدبلوماسي (المادة 31)", "حرمة مقر البعثة (المادة 22)", "آلية إعلان 'الشخص غير المرغوب فيه' (المادة 9)"],
-     "website": "https://legal.un.org/ilc/texts/9_1.shtml", "category": "قانوني"},
-    {"name_ar": "اتفاقية فيينا للعلاقات القنصلية", "name_en": "Vienna Convention on Consular Relations", "name_ru": "Венская конвенция о консульских сношениях", "year": "1963", "type": "معاهدة",
-     "summary_ar": "تنظم عمل القنصليات وحقوق المواطنين في التواصل مع قنصلية دولتهم عند الاحتجاز بالخارج.",
-     "key_points": ["تمييز واضح بين الحصانة الدبلوماسية والقنصلية (الأخيرة أضيق نطاقاً)", "حق الزيارة القنصلية للمواطنين الموقوفين", "تنظيم العلاقات القنصلية بين الدول"],
-     "website": "https://legal.un.org/ilc/texts/9_2.shtml", "category": "قانوني"},
-    {"name_ar": "اتفاقية فيينا لقانون المعاهدات", "name_en": "Vienna Convention on the Law of Treaties", "name_ru": "Венская конвенция о праве международных договоров", "year": "1969", "type": "معاهدة",
-     "summary_ar": "تُعرف بـ'معاهدة المعاهدات' — تضع القواعد العامة لصياغة المعاهدات الدولية وتفسيرها وإنهائها.",
-     "key_points": ["تعريف المعاهدة والتحفظ والتصديق", "مبدأ العقد شريعة المتعاقدين (Pacta Sunt Servanda)", "أسباب بطلان المعاهدات وإنهائها"],
-     "website": "https://legal.un.org/ilc/texts/1_1.shtml", "category": "قانوني"},
-    {"name_ar": "معاهدة عدم انتشار الأسلحة النووية", "name_en": "Treaty on the Non-Proliferation of Nuclear Weapons", "name_ru": "Договор о нераспространении ядерного оружия", "year": "1968", "type": "معاهدة أمنية",
-     "summary_ar": "تهدف لمنع انتشار الأسلحة النووية وتقنياتها، وتعزيز الاستخدام السلمي للطاقة النووية، والسعي لنزع السلاح.",
-     "key_points": ["تميّز بين الدول النووية المعترف بها والدول غير النووية", "تشرف عليها الوكالة الدولية للطاقة الذرية IAEA", "من أكثر المعاهدات الأمنية انضماماً عالمياً"],
-     "website": "https://www.iaea.org/topics/non-proliferation-treaty", "category": "أمني"},
-    {"name_ar": "اتفاقيات جنيف الأربع", "name_en": "Geneva Conventions", "name_ru": "Женевские конвенции", "year": "1949", "type": "معاهدة إنسانية",
-     "summary_ar": "الأساس القانوني للقانون الدولي الإنساني، تحمي الجرحى والأسرى والمدنيين وقت النزاعات المسلحة.",
-     "key_points": ["أربع اتفاقيات رئيسية وثلاثة بروتوكولات إضافية", "تحدد مبدأ التمييز بين المقاتلين والمدنيين", "تشرف على تطبيقها اللجنة الدولية للصليب الأحمر"],
-     "website": "https://www.icrc.org/en/war-and-law/treaties-customary-law/geneva-conventions", "category": "قانوني"},
-    {"name_ar": "اتفاقية باريس للمناخ", "name_en": "Paris Agreement", "name_ru": "Парижское соглашение", "year": "2015", "type": "معاهدة بيئية",
-     "summary_ar": "اتفاق دولي ضمن الأمم المتحدة يهدف للحد من الاحتباس الحراري دون درجتين مئويتين فوق مستويات ما قبل الصناعة.",
-     "key_points": ["يعتمد آلية 'المساهمات المحددة وطنياً' (NDCs)", "غير ملزم بعقوبات مباشرة عند عدم الالتزام", "انسحبت منه الولايات المتحدة وعادت إليه أكثر من مرة"],
-     "website": "https://unfccc.int/process-and-meetings/the-paris-agreement", "category": "بيئي"},
-    {"name_ar": "جامعة الدول العربية", "name_en": "League of Arab States", "name_ru": "Лига арабских государств", "year": "1945", "type": "منظمة إقليمية",
-     "summary_ar": "منظمة إقليمية تضم 22 دولة عربية، تهدف لتنسيق السياسات المشتركة والدفاع عن المصالح العربية.",
-     "key_points": ["مقرها القاهرة", "تصدر قراراتها بالإجماع أو الأغلبية حسب الموضوع", "تضم مجلساً ولجاناً متخصصة اقتصادية وسياسية"],
-     "website": "https://www.lasportal.org", "category": "إقليمي"},
-    {"name_ar": "منظمة معاهدة الأمن الجماعي", "name_en": "Collective Security Treaty Organisation (CSTO)", "name_ru": "Организация Договора о коллективной безопасности (ОДКБ)", "year": "1992/2002", "type": "منظمة أمنية إقليمية",
-     "summary_ar": "تحالف عسكري-أمني يضم روسيا وعدداً من دول ما بعد الاتحاد السوفيتي، يقوم على مبدأ الدفاع الجماعي.",
-     "key_points": ["تشبه في مبدئها المادة 5 من حلف الناتو", "تضم روسيا وأرمينيا وبيلاروسيا وكازاخستان وقيرغيزستان وطاجيكستان", "تُجري تدريبات عسكرية مشتركة دورية"],
-     "website": "https://en.odkb-csto.org", "category": "أمني"},
-    {"name_ar": "منظمة شنغهاي للتعاون", "name_en": "Shanghai Cooperation Organisation (SCO)", "name_ru": "Шанхайская организация сотрудничества (ШОС)", "year": "2001", "type": "منظمة إقليمية",
-     "summary_ar": "منظمة أوراسية للتعاون السياسي والاقتصادي والأمني، تضم روسيا والصين والهند وباكستان ودولاً آسيوية أخرى.",
-     "key_points": ["أُسست في شنغهاي على يد ست دول مؤسسة", "توسّعت لتشمل الهند وباكستان عام 2017 وإيران لاحقاً", "تُعقد قمة سنوية لرؤساء الدول الأعضاء"],
-     "website": "http://eng.sectsco.org", "category": "إقليمي"},
-    {"name_ar": "مجموعة بريكس", "name_en": "BRICS", "name_ru": "БРИКС", "year": "2009", "type": "تكتل اقتصادي",
-     "summary_ar": "تكتل اقتصادي يضم اقتصادات ناشئة كبرى، يسعى لتعزيز التعددية القطبية في النظام الاقتصادي الدولي.",
-     "key_points": ["الاسم اختصار للأعضاء المؤسسين: البرازيل وروسيا والهند والصين وجنوب أفريقيا", "أنشأ بنك التنمية الجديد كبديل جزئي للبنك الدولي", "توسّع التكتل لضم دول جديدة اعتباراً من 2024"],
-     "website": "https://infobrics.org", "category": "اقتصادي"},
-    {"name_ar": "رابطة الدول المستقلة", "name_en": "Commonwealth of Independent States (CIS)", "name_ru": "Содружество Независимых Государств (СНГ)", "year": "1991", "type": "منظمة إقليمية",
-     "summary_ar": "تجمع إقليمي أُنشئ عقب تفكك الاتحاد السوفيتي لتنسيق العلاقات بين الجمهوريات السوفيتية السابقة.",
-     "key_points": ["أُسست باتفاقية بيلوفيجيا 1991", "مقرها الإداري في مينسك بيلاروسيا", "لا تضم جميع جمهوريات الاتحاد السوفيتي السابق (انسحبت جورجيا وأوكرانيا)"],
-     "website": "https://cis.minsk.by", "category": "إقليمي"},
-    {"name_ar": "منظمة التجارة العالمية", "name_en": "World Trade Organization (WTO)", "name_ru": "Всемирная торговая организация (ВТО)", "year": "1995", "type": "منظمة اقتصادية",
-     "summary_ar": "المنظمة الدولية المعنية بوضع قواعد التجارة العالمية وتسوية النزاعات التجارية بين الدول الأعضاء.",
-     "key_points": ["خلفت اتفاقية الغات (GATT) لعام 1947", "تعمل بمبدأ توافق الآراء في اتخاذ القرار", "تضم آلية قضائية لتسوية المنازعات التجارية"],
-     "website": "https://www.wto.org", "category": "اقتصادي"},
-    {"name_ar": "صندوق النقد الدولي", "name_en": "International Monetary Fund (IMF)", "name_ru": "Международный валютный фонд (МВФ)", "year": "1944", "type": "مؤسسة مالية دولية",
-     "summary_ar": "مؤسسة أممية تعنى باستقرار النظام النقدي الدولي وتقديم قروض للدول التي تواجه أزمات في ميزان المدفوعات.",
-     "key_points": ["نشأ في مؤتمر بريتون وودز 1944", "يمنح قروضاً مشروطة بإصلاحات اقتصادية هيكلية", "حقوق التصويت فيه مرتبطة بحصة الدولة المالية"],
-     "website": "https://www.imf.org", "category": "اقتصادي"},
-    {"name_ar": "منظمة الصحة العالمية", "name_en": "World Health Organization (WHO)", "name_ru": "Всемирная организация здравоохранения (ВОЗ)", "year": "1948", "type": "وكالة أممية متخصصة",
-     "summary_ar": "الوكالة الأممية المسؤولة عن التنسيق الصحي الدولي ومواجهة الأوبئة والأزمات الصحية العابرة للحدود.",
-     "key_points": ["مقرها جنيف", "أصدرت اللوائح الصحية الدولية IHR", "قادت التنسيق الدولي خلال جائحة كوفيد-19"],
-     "website": "https://www.who.int", "category": "أممي"},
-    {"name_ar": "الاتحاد الأوروبي", "name_en": "European Union (EU)", "name_ru": "Европейский союз (ЕС)", "year": "1993", "type": "تكتل إقليمي فوق وطني",
-     "summary_ar": "تكتل سياسي واقتصادي فريد يضم 27 دولة أوروبية، يتمتع بدرجة اندماج تفوق أي منظمة إقليمية أخرى.",
-     "key_points": ["أُنشئ بموجب معاهدة ماستريخت 1992", "له عملة موحدة (اليورو) وبرلمان منتخب مباشرة", "يتخذ قرارات ملزمة تتفوق أحياناً على القانون الوطني للأعضاء"],
-     "website": "https://european-union.europa.eu", "category": "إقليمي"},
-    {"name_ar": "مجلس الأمن الدولي", "name_en": "UN Security Council", "name_ru": "Совет Безопасности ООН", "year": "1945", "type": "هيئة أممية رئيسية",
-     "summary_ar": "الهيئة الأممية المسؤولة عن حفظ السلم والأمن الدوليين، وقراراتها ملزمة لجميع الدول الأعضاء.",
-     "key_points": ["15 عضواً: 5 دائمون يملكون الفيتو و10 غير دائمين منتخبين", "الأعضاء الدائمون: الولايات المتحدة وروسيا والصين وفرنسا والمملكة المتحدة", "يمكنه فرض عقوبات أو الإذن باستخدام القوة بموجب الفصل السابع"],
-     "website": "https://www.un.org/securitycouncil", "category": "أممي"},
-]
-
-# ============================================================================
-# 3) نصوص المحاكي (استوديو الترجمة)
-# ============================================================================
-
-TEXTS = [
-    {"id": 1, "title_ar": "بيان مشترك حول العلاقات الثنائية", "source_lang": "ru", "target_lang": "ar",
-     "source_text": "Стороны подтвердили приверженность дальнейшему укреплению стратегического партнёрства и договорились продолжить консультации по региональным вопросам, представляющим взаимный интерес.",
-     "model_translation": "أكد الطرفان التزامهما بمواصلة تعزيز الشراكة الاستراتيجية، واتفقا على استمرار المشاورات بشأن القضايا الإقليمية ذات الاهتمام المشترك.",
-     "difficulty": "متوسط"},
-    {"id": 2, "title_ar": "تصريح وزاري حول وقف إطلاق النار", "source_lang": "ar", "target_lang": "ru",
-     "source_text": "دعت وزارة الخارجية جميع الأطراف إلى الالتزام الكامل بوقف إطلاق النار، والامتناع عن أي أعمال من شأنها تصعيد الموقف الميداني.",
-     "model_translation": "Министерство иностранных дел призвало все стороны полностью соблюдать режим прекращения огня и воздерживаться от любых действий, способных привести к эскалации ситуации на месте.",
-     "difficulty": "متوسط"},
-    {"id": 3, "title_ar": "بيان حول العقوبات الاقتصادية", "source_lang": "ru", "target_lang": "ar",
-     "source_text": "Российская сторона выразила серьёзную обеспокоенность введением новых односторонних санкций, заявив, что подобные меры противоречат нормам международного права и Уставу ООН.",
-     "model_translation": "أعرب الجانب الروسي عن قلقه البالغ إزاء فرض عقوبات أحادية جديدة، مؤكداً أن مثل هذه الإجراءات تتعارض مع قواعد القانون الدولي وميثاق الأمم المتحدة.",
-     "difficulty": "صعب"},
-    {"id": 4, "title_ar": "دعوة لقمة إقليمية", "source_lang": "ar", "target_lang": "ru",
-     "source_text": "وجهت المملكة الدعوة لعقد قمة إقليمية طارئة لبحث سبل تعزيز الأمن الجماعي ومواجهة التحديات الاقتصادية المشتركة.",
-     "model_translation": "Королевство направило приглашение к проведению внеочередного регионального саммита для обсуждения путей укрепления коллективной безопасности и решения общих экономических проблем.",
-     "difficulty": "صعب"},
-    {"id": 5, "title_ar": "مذكرة تفاهم بشأن التعاون العلمي", "source_lang": "ru", "target_lang": "ar",
-     "source_text": "Стороны подписали меморандум о взаимопонимании в области научного и технологического сотрудничества, включая обмен студентами и совместные исследовательские программы.",
-     "model_translation": "وقّع الطرفان مذكرة تفاهم في مجال التعاون العلمي والتكنولوجي، تشمل تبادل الطلاب وبرامج البحث المشترك.",
-     "difficulty": "سهل"},
-    {"id": 6, "title_ar": "بيان حول حرية الملاحة", "source_lang": "ar", "target_lang": "ru",
-     "source_text": "شددت الدولة على أهمية ضمان حرية الملاحة الدولية في الممرات المائية الاستراتيجية، وفقاً لأحكام القانون الدولي للبحار.",
-     "model_translation": "Государство подчеркнуло важность обеспечения свободы международного судоходства в стратегических морских проливах в соответствии с положениями международного морского права.",
-     "difficulty": "متوسط"},
-    {"id": 7, "title_ar": "تصريح حول التطبيع الدبلوماسي", "source_lang": "ru", "target_lang": "ar",
-     "source_text": "Обе стороны выразили готовность к полной нормализации дипломатических отношений и обмену послами в ближайшее время.",
-     "model_translation": "أعرب الطرفان عن استعدادهما للتطبيع الكامل للعلاقات الدبلوماسية وتبادل السفراء في القريب العاجل.",
-     "difficulty": "سهل"},
-    {"id": 8, "title_ar": "بيان حول التعاون الأمني الإقليمي", "source_lang": "ru", "target_lang": "ar",
-     "source_text": "Стороны договорились укреплять сотрудничество в сфере борьбы с терроризмом и трансграничной преступностью в рамках существующих региональных механизмов.",
-     "model_translation": "اتفق الطرفان على تعزيز التعاون في مجال مكافحة الإرهاب والجريمة العابرة للحدود في إطار الآليات الإقليمية القائمة.",
-     "difficulty": "متوسط"},
-    {"id": 9, "title_ar": "دعوة لوقف التصعيد", "source_lang": "ar", "target_lang": "ru",
-     "source_text": "طالبت الأمانة العامة جميع الأطراف بضبط النفس والامتناع عن أي خطوات أحادية من شأنها المساس بجهود التهدئة الجارية.",
-     "model_translation": "Генеральный секретариат призвал все стороны проявлять сдержанность и воздерживаться от любых односторонних шагов, способных подорвать текущие усилия по деэскалации.",
-     "difficulty": "صعب"},
-]
-
-# ============================================================================
-# 4) نماذج المقالات السياسية والتحليلية للمراجعة
-# ============================================================================
-
-SAMPLE_ESSAYS = [
-    {
-        "title_ar": "نموذج تحليلي: التعددية القطبية والنظام الدولي",
-        "lang": "ru",
-        "text": (
-            "Современная международная система переживает переход от однополярного порядка "
-            "к более сложной многополярной структуре. Усиление роли таких держав, как Китай "
-            "и Индия, наряду с сохраняющимся влиянием России, свидетельствует о постепенном "
-            "перераспределении глобального влияния. Данный процесс сопровождается ростом "
-            "значения региональных организаций и многосторонних форматов сотрудничества, "
-            "что требует от дипломатии большей гибкости и способности к балансированию "
-            "интересов различных центров силы."
-        ),
-        "translation_ar": (
-            "يشهد النظام الدولي المعاصر انتقالاً من نظام أحادي القطبية إلى بنية أكثر تعقيداً "
-            "متعددة الأقطاب. ويعكس تصاعد دور قوى مثل الصين والهند، إلى جانب استمرار نفوذ روسيا، "
-            "إعادة توزيع تدريجية للنفوذ العالمي. وتواكب هذه العملية أهمية متنامية للمنظمات "
-            "الإقليمية وصيغ التعاون متعددة الأطراف، مما يتطلب من الدبلوماسية مرونة أكبر وقدرة "
-            "على موازنة مصالح مراكز القوة المختلفة."
-        ),
-        "notes_ar": "لاحظ استخدام المصطلحات: многополярность (تعددية قطبية)، перераспределение влияния (إعادة توزيع النفوذ)، баланс интересов (موازنة المصالح) — مفردات متكررة في مقالات التحليل السياسي الروسية.",
-    },
-    {
-        "title_ar": "نموذج تحليلي: دور الدبلوماسية الوقائية",
-        "lang": "ru",
-        "text": (
-            "Превентивная дипломатия остаётся одним из наиболее эффективных инструментов "
-            "предотвращения эскалации региональных конфликтов. Своевременное направление "
-            "миссий по установлению фактов, а также активное посредничество со стороны "
-            "нейтральных сторон способны существенно снизить риск перерастания напряжённости "
-            "в вооружённое противостояние. Опыт последних десятилетий показывает, что успех "
-            "превентивных мер во многом зависит от политической воли сторон конфликта и "
-            "готовности международного сообщества к раннему вмешательству."
-        ),
-        "translation_ar": (
-            "تظل الدبلوماسية الوقائية إحدى أكثر الأدوات فعالية لمنع تصاعد النزاعات الإقليمية. "
-            "فالإيفاد المبكر لبعثات تقصي الحقائق، إلى جانب الوساطة الفاعلة من أطراف محايدة، "
-            "قادر على خفض مخاطر تحوّل التوتر إلى مواجهة مسلحة بشكل كبير. وتُظهر تجارب العقود "
-            "الأخيرة أن نجاح التدابير الوقائية يعتمد إلى حد بعيد على الإرادة السياسية لأطراف "
-            "النزاع، واستعداد المجتمع الدولي للتدخل المبكر."
-        ),
-        "notes_ar": "ركّز على: миссии по установлению фактов (بعثات تقصي الحقائق)، политическая воля (الإرادة السياسية)، раннее вмешательство (التدخل المبكر) — هذه العبارات شائعة في تقارير الأمم المتحدة المترجمة للروسية.",
-    },
-    {
-        "title_ar": "نموذج تحليلي: العقوبات الاقتصادية كأداة سياسية",
-        "lang": "ru",
-        "text": (
-            "Экономические санкции превратились в один из ключевых инструментов внешней "
-            "политики ведущих держав. Однако их эффективность остаётся предметом дискуссий "
-            "среди экспертов: односторонние ограничительные меры нередко наносят ущерб не "
-            "только целевому государству, но и мировой экономике в целом, провоцируя рост цен "
-            "на энергоносители и нарушение цепочек поставок. В этой связи многие государства "
-            "выступают за сохранение центральной роли Совета Безопасности ООН в вопросах "
-            "легитимации подобных мер."
-        ),
-        "translation_ar": (
-            "تحوّلت العقوبات الاقتصادية إلى إحدى الأدوات الرئيسية للسياسة الخارجية للقوى الكبرى. "
-            "غير أن فعاليتها تظل موضع نقاش بين الخبراء: فالتدابير التقييدية الأحادية كثيراً ما "
-            "تُلحق ضرراً ليس فقط بالدولة المستهدفة، بل بالاقتصاد العالمي ككل، إذ تتسبب في ارتفاع "
-            "أسعار الطاقة واضطراب سلاسل الإمداد. وفي هذا السياق، تدعو دول عديدة إلى الحفاظ على "
-            "الدور المحوري لمجلس الأمن الدولي في إضفاء الشرعية على مثل هذه التدابير."
-        ),
-        "notes_ar": "مصطلحات مفتاحية: односторонние меры (تدابير أحادية)، цепочки поставок (سلاسل الإمداد)، легитимация (إضفاء الشرعية) — مفيدة جداً لأسئلة المقال عن العقوبات.",
-    },
-]
-
-# ============================================================================
-# 5) بنك الأسئلة (MCQ موسّع + مقالية)
-# ============================================================================
-
-MCQ = [
-    {"id": 1, "question_ar": "ما هو العام الذي أُبرمت فيه اتفاقية فيينا للعلاقات الدبلوماسية؟", "question_ru": "", "option_a": "1955", "option_b": "1961", "option_c": "1970", "option_d": "1985", "correct_answer": "B", "explanation_ar": "أُبرمت اتفاقية فيينا للعلاقات الدبلوماسية عام 1961 وتُعد الأساس القانوني الدولي لتنظيم العلاقات الدبلوماسية.", "category": "قانوني", "difficulty": "سهل"},
-    {"id": 2, "question_ar": "أي عضو من أعضاء مجلس الأمن الدولي لا يملك حق النقض (الفيتو)؟", "question_ru": "", "option_a": "روسيا", "option_b": "الصين", "option_c": "ألمانيا", "option_d": "فرنسا", "correct_answer": "C", "explanation_ar": "الأعضاء الدائمون الخمسة الذين يملكون حق الفيتو هم: الولايات المتحدة، روسيا، الصين، فرنسا، والمملكة المتحدة. ألمانيا ليست عضواً دائماً.", "category": "سياسي", "difficulty": "سهل"},
-    {"id": 3, "question_ar": "ماذا يعني مصطلح Persona Non Grata؟", "question_ru": "", "option_a": "دبلوماسي معتمد حديثاً", "option_b": "شخصية مرفوضة من الدولة المضيفة", "option_c": "مبعوث خاص للأمم المتحدة", "option_d": "مستشار اقتصادي", "correct_answer": "B", "explanation_ar": "يستخدم هذا المصطلح للإشارة إلى دبلوماسي تعلن الدولة المضيفة رفضها له وتطلب استبداله أو مغادرته.", "category": "قانوني", "difficulty": "متوسط"},
-    {"id": 4, "question_ar": "ماذا يعني تعبير 'вручение верительных грамот'؟", "question_ru": "Что означает термин «вручение верительных грамот»?", "option_a": "توقيع اتفاقية تجارية", "option_b": "مراسم تقديم أوراق اعتماد السفير", "option_c": "عقد قمة ثنائية", "option_d": "فرض عقوبات دبلوماسية", "correct_answer": "B", "explanation_ar": "هذا التعبير يعني مراسم تقديم السفير أوراق اعتماده رسمياً لرئيس الدولة المضيفة.", "category": "دبلوماسي", "difficulty": "متوسط"},
-    {"id": 5, "question_ar": "ما المقصود بـ'التعددية القطبية' في العلاقات الدولية؟", "question_ru": "", "option_a": "هيمنة قوة عظمى واحدة على النظام الدولي", "option_b": "توزع النفوذ الدولي على عدة أقطاب قوة", "option_c": "اتحاد الدول في منظمة واحدة", "option_d": "إلغاء مجلس الأمن الدولي", "correct_answer": "B", "explanation_ar": "التعددية القطبية تصف نظاماً دولياً يتوزع فيه ميزان القوى والنفوذ بين عدة قوى كبرى بدلاً من هيمنة قوة واحدة.", "category": "سياسي", "difficulty": "سهل"},
-    {"id": 6, "question_ar": "أي من التالي يُعد مثالاً على 'الدبلوماسية الوقائية'؟", "question_ru": "", "option_a": "فرض عقوبات اقتصادية بعد اندلاع حرب", "option_b": "إرسال بعثة مراقبة أممية لمنع تصاعد نزاع حدودي", "option_c": "إعلان الحرب رسمياً", "option_d": "سحب السفير من دولة معادية", "correct_answer": "B", "explanation_ar": "الدبلوماسية الوقائية تهدف إلى منع نشوب النزاعات قبل تفاقمها، ومن أمثلتها إيفاد بعثات المراقبة والوساطة المبكرة.", "category": "سياسي", "difficulty": "متوسط"},
-    {"id": 7, "question_ar": "ما الترجمة الروسية الصحيحة لمصطلح 'الحصانة الدبلوماسية'؟", "question_ru": "", "option_a": "Дипломатическая нота", "option_b": "Дипломатический иммунитет", "option_c": "Дипломатический протокол", "option_d": "Дипломатический корпус", "correct_answer": "B", "explanation_ar": "'Дипломатический иммунитет' هي الترجمة الروسية الدقيقة لمصطلح الحصانة الدبلوماسية.", "category": "لغوي", "difficulty": "سهل"},
-    {"id": 8, "question_ar": "متى دخلت معاهدة عدم انتشار الأسلحة النووية حيّز التنفيذ؟", "question_ru": "", "option_a": "1963", "option_b": "1968", "option_c": "1975", "option_d": "1991", "correct_answer": "B", "explanation_ar": "فُتح باب التوقيع على المعاهدة عام 1968 ودخلت حيّز التنفيذ عام 1970.", "category": "أمني", "difficulty": "متوسط"},
-    {"id": 9, "question_ar": "أي منظمة أُنشئت عقب تفكك الاتحاد السوفيتي لتنسيق العلاقات بين الجمهوريات السابقة؟", "question_ru": "", "option_a": "منظمة شنغهاي للتعاون", "option_b": "رابطة الدول المستقلة", "option_c": "منظمة معاهدة الأمن الجماعي", "option_d": "الاتحاد الأوراسي", "correct_answer": "B", "explanation_ar": "رابطة الدول المستقلة (СНГ) أُسست عام 1991 باتفاقية بيلوفيجيا عقب تفكك الاتحاد السوفيتي.", "category": "إقليمي", "difficulty": "متوسط"},
-    {"id": 10, "question_ar": "ما هي 'القوة الناعمة' وفق مفهوم جوزيف ناي؟", "question_ru": "", "option_a": "استخدام القوة العسكرية لتحقيق أهداف سياسية", "option_b": "قدرة الدولة على التأثير عبر الجاذبية الثقافية والقيمية", "option_c": "فرض عقوبات اقتصادية صارمة", "option_d": "الحصانة الدبلوماسية للمبعوثين", "correct_answer": "B", "explanation_ar": "القوة الناعمة (Soft Power) مفهوم صاغه جوزيف ناي للإشارة إلى التأثير عبر الجاذبية لا الإكراه.", "category": "سياسي", "difficulty": "صعب"},
-    {"id": 11, "question_ar": "أي دولة ليست عضواً مؤسساً في مجموعة بريكس؟", "question_ru": "", "option_a": "البرازيل", "option_b": "الهند", "option_c": "تركيا", "option_d": "جنوب أفريقيا", "correct_answer": "C", "explanation_ar": "الأعضاء المؤسسون لبريكس هم: البرازيل وروسيا والهند والصين، وانضمت جنوب أفريقيا لاحقاً عام 2010. تركيا ليست من الأعضاء المؤسسين.", "category": "اقتصادي", "difficulty": "متوسط"},
-    {"id": 12, "question_ar": "ما وظيفة 'الملحق العسكري' في البعثة الدبلوماسية؟", "question_ru": "", "option_a": "الإشراف على الشؤون القنصلية", "option_b": "تمثيل بلاده في الشؤون العسكرية والدفاعية لدى الدولة المضيفة", "option_c": "إدارة الشؤون المالية للسفارة", "option_d": "الترجمة الفورية للسفير", "correct_answer": "B", "explanation_ar": "الملحق العسكري ضابط عسكري يمثل بلاده في الشؤون العسكرية والدفاعية ضمن البعثة الدبلوماسية.", "category": "دبلوماسي", "difficulty": "سهل"},
-    {"id": 13, "question_ar": "ما الفرق الجوهري بين 'التصديق' و'التوقيع' على معاهدة دولية؟", "question_ru": "", "option_a": "لا فرق بينهما", "option_b": "التوقيع مرحلة أولية، والتصديق هو الالتزام الرسمي النهائي بالمعاهدة", "option_c": "التصديق يسبق التوقيع دائماً", "option_d": "التوقيع يُلزم الدولة فوراً دون الحاجة لتصديق", "correct_answer": "B", "explanation_ar": "وفق اتفاقية فيينا لقانون المعاهدات 1969، التوقيع يعبّر عن نية أولية، بينما التصديق هو الإجراء الذي يُنشئ الالتزام القانوني الكامل.", "category": "قانوني", "difficulty": "صعب"},
-    {"id": 14, "question_ar": "أي من هذه المنظمات تضم روسيا والصين كعضوين مؤسسين رئيسيين؟", "question_ru": "", "option_a": "الاتحاد الأوروبي", "option_b": "منظمة شنغهاي للتعاون", "option_c": "جامعة الدول العربية", "option_d": "حلف شمال الأطلسي", "correct_answer": "B", "explanation_ar": "منظمة شنغهاي للتعاون تأسست عام 2001 وتضم روسيا والصين كعضوين رئيسيين إلى جانب دول آسيا الوسطى.", "category": "إقليمي", "difficulty": "سهل"},
-    {"id": 15, "question_ar": "ماذا تعني عبارة 'Pacta Sunt Servanda' في القانون الدولي؟", "question_ru": "", "option_a": "الحرب آخر الحلول", "option_b": "العقد شريعة المتعاقدين — يجب الوفاء بالمعاهدات بحسن نية", "option_c": "السيادة مطلقة لا تُقيّد", "option_d": "الحياد يعني عدم التدخل", "correct_answer": "B", "explanation_ar": "هذا المبدأ اللاتيني أساسي في قانون المعاهدات، ويعني وجوب الوفاء بالالتزامات التعاهدية بحسن نية، وقد كرّسته اتفاقية فيينا لقانون المعاهدات 1969.", "category": "قانوني", "difficulty": "صعب"},
-]
-
-ESSAYS = [
-    {"id": 101, "question_ar": "اكتب مقالاً موجزاً (150-200 كلمة) باللغة الروسية حول أهمية الدبلوماسية الوقائية في منع النزاعات الإقليمية.", "explanation_ar": "يُقيَّم المقال بناءً على: صحة القواعد النحوية الروسية، استخدام المصطلحات الدبلوماسية الدقيقة، ترابط الأفكار، والقدرة على الإقناع.", "category": "مقالي"},
-    {"id": 102, "question_ar": "ناقش دور منظمة الأمم المتحدة في تنظيم العلاقات الاقتصادية بين الدول، مستخدماً ثلاثة مصطلحات دبلوماسية على الأقل.", "explanation_ar": "يُقيَّم المقال بناءً على: الدقة المفاهيمية، توظيف المصطلحات الصحيحة، بناء حجة منطقية متماسكة.", "category": "مقالي"},
-    {"id": 103, "question_ar": "بالروسية: عبّر عن رأيك حول أهمية الحصانة الدبلوماسية وحدودها القانونية في العلاقات الدولية المعاصرة.", "explanation_ar": "يُقيَّم بناءً على: الدقة الاصطلاحية، سلامة التركيب النحوي الروسي، ووضوح الحجة القانونية.", "category": "مقالي"},
-    {"id": 104, "question_ar": "قارن بين مفهومي 'القوة الصلبة' و'القوة الناعمة' في السياسة الخارجية الروسية المعاصرة، مع أمثلة.", "explanation_ar": "يُقيَّم بناءً على: عمق التحليل المقارن، دقة الأمثلة، تماسك البنية الحجاجية.", "category": "مقالي"},
-    {"id": 105, "question_ar": "اشرح بالروسية أهمية منظمة شنغهاي للتعاون كنموذج للتعددية القطبية في آسيا.", "explanation_ar": "يُقيَّم بناءً على: توظيف المصطلحات الجغرافية-السياسية الصحيحة، دقة اللغة الروسية، الترابط المنطقي.", "category": "مقالي"},
-]
-
-# ============================================================================
-# 6) محرك تقييم الترجمة الذكي (ثلاثي اللغة) — بايثون خالص، بلا مكتبات ثقيلة
-# ============================================================================
-
-FORMALITY_MARKERS = {
-    "ar": ["بموجب", "وفقاً ل", "وفقا ل", "فخامة", "معالي", "سعادة", "يشرفني", "أكدت", "أعربت",
-           "شددت", "دعت", "التزام", "بالنيابة عن", "إثر", "من جانبه", "الجانبين", "الطرفين",
-           "في هذا السياق", "تجدر الإشارة"],
-    "en": ["pursuant to", "in accordance with", "his excellency", "her excellency", "on behalf of",
-           "the parties", "reaffirmed", "expressed", "underscored", "hereby", "with regard to",
-           "in this context", "shall", "commitment"],
-    "ru": ["в соответствии с", "стороны", "выразил", "подчеркнул", "подтвердил", "от имени",
-           "его превосходительство", "её превосходительство", "в связи с", "настоящим",
-           "обязательство", "в рамках"],
-}
-INFORMALITY_PENALTY_WORDS = {
-    "ar": ["يعني", "بصراحة", "حلو", "تمام", "اوكي", "أوكي"],
-    "en": ["gonna", "wanna", "kinda", "stuff", "guys", "ok", "okay"],
-    "ru": ["короче", "типа", "ладно", "окей", "клёво"],
-}
-
-
-@dataclass
-class EvaluationResult:
-    overall_score: float
-    similarity_score: float
-    terminology_score: float
-    completeness_score: float
-    formality_score: float
-    matched_terms: list = field(default_factory=list)
-    missing_terms: list = field(default_factory=list)
-    feedback_ar: str = ""
-    feedback_en: str = ""
-    feedback_ru: str = ""
-    diff_html: str = ""
-    grade_label_ar: str = ""
-
-
-def _normalize(text: str, lang: str) -> str:
-    text = text.strip()
-    if lang == "ar":
-        text = re.sub(r"[\u064B-\u0652\u0670\u0640]", "", text)
-    else:
-        text = text.lower()
-    text = re.sub(r"\s+", " ", text)
-    return text
-
-
-def _tokenize(text: str) -> list:
-    return re.findall(r"\w+", text, flags=re.UNICODE)
-
-
-def _cosine_similarity_pure(text_a: str, text_b: str) -> float:
-    tokens_a = _tokenize(text_a)
-    tokens_b = _tokenize(text_b)
-    if not tokens_a or not tokens_b:
-        return 0.0
-    counts_a = Counter(tokens_a)
-    counts_b = Counter(tokens_b)
-    shared_vocab = set(counts_a) | set(counts_b)
-    dot = sum(counts_a.get(w, 0) * counts_b.get(w, 0) for w in shared_vocab)
-    norm_a = math.sqrt(sum(v * v for v in counts_a.values()))
-    norm_b = math.sqrt(sum(v * v for v in counts_b.values()))
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return dot / (norm_a * norm_b)
-
-
-def _similarity_score(user_text: str, reference_text: str, lang: str) -> float:
-    a = _normalize(user_text, lang)
-    b = _normalize(reference_text, lang)
-    if not a or not b:
-        return 0.0
-    cosine_sim = _cosine_similarity_pure(a, b)
-    seq_sim = difflib.SequenceMatcher(None, a, b).ratio()
-    combined = 0.7 * cosine_sim + 0.3 * seq_sim
-    return round(combined * 100, 1)
-
-
-def _extract_terms_for_text(text: str, lang: str, glossary_df: pd.DataFrame) -> set:
-    col = {"ar": "term_ar", "en": "term_en", "ru": "term_ru"}[lang]
-    norm_text = _normalize(text, lang)
-    found = set()
-    for term in glossary_df[col].dropna().unique():
-        norm_term = _normalize(str(term), lang)
-        if norm_term and norm_term in norm_text:
-            found.add(term)
-    return found
-
-
-def _completeness_score(user_text: str, reference_text: str) -> float:
-    len_user = len(user_text.split())
-    len_ref = len(reference_text.split())
-    if len_ref == 0:
-        return 0.0
-    ratio = len_user / len_ref
-    if 0.85 <= ratio <= 1.25:
-        return 100.0
-    elif ratio < 0.85:
-        return round(max(0.0, ratio / 0.85) * 100, 1)
-    else:
-        excess = ratio - 1.25
-        return round(max(0.0, 100 - excess * 60), 1)
-
-
-def _formality_score(user_text: str, lang: str) -> float:
-    norm = _normalize(user_text, lang)
-    markers = FORMALITY_MARKERS.get(lang, [])
-    informal = INFORMALITY_PENALTY_WORDS.get(lang, [])
-    hits = sum(1 for m in markers if _normalize(m, lang) in norm)
-    penalties = sum(1 for w in informal if _normalize(w, lang) in norm)
-    base = min(100.0, 55 + hits * 15)
-    base -= penalties * 20
-    return round(max(0.0, min(100.0, base)), 1)
-
-
-def _terminology_score(user_text: str, reference_text: str, lang: str, glossary_df: pd.DataFrame) -> tuple:
-    ref_terms = _extract_terms_for_text(reference_text, lang, glossary_df)
-    user_terms = _extract_terms_for_text(user_text, lang, glossary_df)
-    if not ref_terms:
-        return 100.0, [], []
-    matched = ref_terms & user_terms
-    missing = ref_terms - user_terms
-    score = round((len(matched) / len(ref_terms)) * 100, 1)
-    return score, sorted(matched), sorted(missing)
-
-
-def _make_diff_html(user_text: str, reference_text: str) -> str:
-    sm = difflib.SequenceMatcher(None, user_text.split(), reference_text.split())
-    parts = []
-    for tag, i1, i2, j1, j2 in sm.get_opcodes():
-        user_chunk = " ".join(user_text.split()[i1:i2])
-        ref_chunk = " ".join(reference_text.split()[j1:j2])
-        if tag == "equal":
-            parts.append(f"<span>{user_chunk}</span>")
-        elif tag == "replace":
-            parts.append(f"<span style='background:#ffe3e3;text-decoration:line-through'>{user_chunk}</span> "
-                          f"<span style='background:#d3f9d8'>{ref_chunk}</span>")
-        elif tag == "delete":
-            parts.append(f"<span style='background:#d3f9d8'>+ {ref_chunk}</span>")
-        elif tag == "insert":
-            parts.append(f"<span style='background:#ffe3e3;text-decoration:line-through'>{user_chunk}</span>")
-    return " ".join(parts)
-
-
-def _grade_label(score: float) -> str:
-    if score >= 90:
-        return "ممتاز — بمستوى مترجم دبلوماسي محترف 🏅"
-    elif score >= 75:
-        return "جيد جداً — قريب من الاحتراف مع ملاحظات بسيطة 👍"
-    elif score >= 60:
-        return "مقبول — يحتاج تحسين في الدقة الاصطلاحية 📘"
-    elif score >= 40:
-        return "ضعيف — راجع المفردات الدبلوماسية الأساسية 📖"
-    else:
-        return "يحتاج إعادة عمل جوهرية 🔄"
-
-
-def evaluate_translation(user_text, reference_text, target_lang, glossary_df, weights=None) -> EvaluationResult:
-    weights = weights or {"similarity": 0.40, "terminology": 0.30, "completeness": 0.15, "formality": 0.15}
-    similarity = _similarity_score(user_text, reference_text, target_lang)
-    completeness = _completeness_score(user_text, reference_text)
-    formality = _formality_score(user_text, target_lang)
-    terminology, matched, missing = _terminology_score(user_text, reference_text, target_lang, glossary_df)
-
-    overall = round(
-        similarity * weights["similarity"] + terminology * weights["terminology"]
-        + completeness * weights["completeness"] + formality * weights["formality"], 1
-    )
-    diff_html = _make_diff_html(user_text, reference_text)
-
-    fb_ar = (f"النتيجة الإجمالية: {overall}/100 — {_grade_label(overall)}\n"
-             f"• التشابه مع النموذج: {similarity}%\n"
-             f"• تغطية المصطلحات الدبلوماسية: {terminology}%" +
-             (f" (فاتتك: {', '.join(missing)})" if missing else " (تغطية كاملة ✅)") +
-             f"\n• اكتمال المحتوى: {completeness}%\n• مستوى الرسمية الدبلوماسية: {formality}%")
-    fb_en = (f"Overall Score: {overall}/100\n"
-             f"• Semantic similarity to reference: {similarity}%\n"
-             f"• Diplomatic terminology coverage: {terminology}%" +
-             (f" (missing: {', '.join(missing)})" if missing else " (full coverage ✅)") +
-             f"\n• Content completeness: {completeness}%\n• Diplomatic register/formality: {formality}%")
-    fb_ru = (f"Общий балл: {overall}/100\n"
-             f"• Смысловое сходство с эталоном: {similarity}%\n"
-             f"• Охват дипломатической терминологии: {terminology}%" +
-             (f" (пропущено: {', '.join(missing)})" if missing else " (полный охват ✅)") +
-             f"\n• Полнота содержания: {completeness}%\n• Дипломатический регистр: {formality}%")
-
-    return EvaluationResult(
-        overall_score=overall, similarity_score=similarity, terminology_score=terminology,
-        completeness_score=completeness, formality_score=formality, matched_terms=matched,
-        missing_terms=missing, feedback_ar=fb_ar, feedback_en=fb_en, feedback_ru=fb_ru,
-        diff_html=diff_html, grade_label_ar=_grade_label(overall),
-    )
+        return [{"error": f"تعذّر تحليل استجابة النموذج ({e})."}]
 
 
 GEMINI_MODEL = "gemini-2.5-flash"
@@ -2655,6 +963,7 @@ defaults = {
     "study_streak_dates": set(),
     "api_key": "",
     "daily_word": None,
+    "extra_glossary_terms": [],
     "exam_started": False,
     "exam_answers": {},
 }
@@ -2688,8 +997,8 @@ with st.sidebar:
     st.markdown("---")
 
     st.markdown("### 🎨 إعدادات العرض")
-    new_theme = st.radio("السمة", ["داكن", "فاتح"], index=["داكن", "فاتح"].index(st.session_state.theme_mode), horizontal=True)
-    new_font = st.select_slider("حجم الخط", options=["عادي", "كبير", "كبير جداً"], value=st.session_state.font_scale)
+    new_theme = st.radio("السمة", ["داكن", "فاتح"], index=["داكن", "فاتح"].index(st.session_state.theme_mode), horizontal=True, key="theme_radio")
+    new_font = st.select_slider("حجم الخط", options=["عادي", "كبير", "كبير جداً"], value=st.session_state.font_scale, key="font_slider")
     if new_theme != st.session_state.theme_mode or new_font != st.session_state.font_scale:
         st.session_state.theme_mode = new_theme
         st.session_state.font_scale = new_font
@@ -2725,6 +1034,7 @@ with st.sidebar:
         data=json.dumps(progress_payload, ensure_ascii=False, indent=2),
         file_name=f"my_progress_{datetime.now().strftime('%Y%m%d')}.json",
         mime="application/json",
+        key="download_progress_btn",
     )
     uploaded_progress = st.file_uploader("⬆️ استيراد ملف تقدم سابق", type=["json"], key="progress_uploader")
     if uploaded_progress is not None:
@@ -2747,7 +1057,7 @@ with st.sidebar:
     )
     st.markdown("[🆓 احصل على مفتاحك المجاني من Google AI Studio ←](https://aistudio.google.com/apikey)")
     st.session_state.api_key = st.text_input("Gemini API Key", type="password", value=st.session_state.api_key,
-                                              placeholder="AIza...", help="يبدأ عادة بـ AIza")
+                                              placeholder="AIza...", help="يبدأ عادة بـ AIza", key="gemini_api_key_input")
     st.caption("💡 باقي التطبيق (المعجم، البطاقات، بنك الأسئلة، مرجع المعاهدات، الأخبار، مقيّم الترجمة) يعمل بالكامل بدون أي مفتاح.")
 
     st.markdown("---")
@@ -2786,13 +1096,43 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
 with tab1:
     st.subheader("📖 المعجم الدبلوماسي الثلاثي اللغة")
 
+    # دمج المصطلحات الأساسية مع أي مصطلحات وُلِّدت بالذكاء الاصطناعي خلال هذه الجلسة
+    if st.session_state.extra_glossary_terms:
+        working_glossary_df = pd.concat(
+            [glossary_df, pd.DataFrame(st.session_state.extra_glossary_terms)], ignore_index=True
+        )
+    else:
+        working_glossary_df = glossary_df
+
+    gen_terms_col1, gen_terms_col2 = st.columns([3, 1])
+    with gen_terms_col1:
+        st.caption("📈 المعجم ينمو فعلياً: اضغط الزر لإضافة مصطلحات جديدة حقيقية إلى الجدول والبطاقات أدناه — لا يقتصر الأمر على قائمة ثابتة.")
+    with gen_terms_col2:
+        grow_glossary_clicked = st.button("🎲 أضف 5 مصطلحات جديدة", key="grow_glossary_btn", disabled=not st.session_state.api_key)
+
+    if grow_glossary_clicked:
+        with st.spinner("جارٍ توليد مصطلحات جديدة..."):
+            existing_names = working_glossary_df["term_ar"].tolist()
+            new_terms = generate_ai_glossary_terms(existing_names, st.session_state.api_key, n=5)
+        if new_terms and "error" in new_terms[0]:
+            st.error(new_terms[0]["error"])
+        else:
+            st.session_state.extra_glossary_terms.extend(new_terms)
+            for t in new_terms:
+                st.session_state.leitner_boxes.setdefault(t["term_ar"], 1)
+            st.success(f"✅ أُضيفت {len(new_terms)} مصطلحات جديدة إلى معجمك — ستجدها الآن في الجدول والبطاقات.")
+            st.rerun()
+
+    if not st.session_state.api_key:
+        st.caption("🔑 أضف مفتاح Gemini API المجاني في الشريط الجانبي لتفعيل توسيع المعجم تلقائياً.")
+
     col_filter1, col_filter2 = st.columns(2)
     with col_filter1:
-        category_filter = st.selectbox("تصفية حسب الفئة", ["الكل"] + sorted(glossary_df["category"].unique().tolist()))
+        category_filter = st.selectbox("تصفية حسب الفئة", ["الكل"] + sorted(working_glossary_df["category"].unique().tolist()), key="glossary_category_filter")
     with col_filter2:
-        search_term = st.text_input("🔍 بحث عن مصطلح")
+        search_term = st.text_input("🔍 بحث عن مصطلح", key="glossary_search")
 
-    filtered_df = glossary_df.copy()
+    filtered_df = working_glossary_df.copy()
     if category_filter != "الكل":
         filtered_df = filtered_df[filtered_df["category"] == category_filter]
     if search_term:
@@ -2808,7 +1148,9 @@ with tab1:
         column_config={"term_ar": "المصطلح (عربي)", "term_en": "English", "term_ru": "Русский",
                         "category": "الفئة", "definition_ar": "التعريف", "source": "📚 المصدر"},
     )
-    st.caption(f"إجمالي المصطلحات المعروضة: {len(filtered_df)} من أصل {len(glossary_df)}")
+    st.caption(f"إجمالي المصطلحات المعروضة: {len(filtered_df)} من أصل {len(working_glossary_df)}"
+               + (f" (منها {len(st.session_state.extra_glossary_terms)} مولَّدة حديثاً)" if st.session_state.extra_glossary_terms else ""))
+
 
     st.markdown("---")
     st.subheader("🔎 استكشف أي مصطلح جديد (مصدر مزدوج متجدد — لا يقتصر على المعجم الثابت)")
@@ -2820,11 +1162,11 @@ with tab1:
 
     explore_col1, explore_col2 = st.columns([3, 1])
     with explore_col1:
-        explore_query = st.text_input("مصطلح للاستكشاف", placeholder="مثال: الأمن الجماعي، Détente، Разрядка، الدبلوماسية الرقمية")
+        explore_query = st.text_input("مصطلح للاستكشاف", placeholder="مثال: الأمن الجماعي، Détente، Разрядка، الدبلوماسية الرقمية", key="explore_term_input")
     with explore_col2:
         explore_lang_choice = st.selectbox("اللغة المفضّلة للبحث", ["ar", "en", "ru"], format_func=lambda x: {"ar": "عربي", "en": "إنجليزي", "ru": "روسي"}[x], key="explore_lang")
 
-    explore_clicked = st.button("🔍 استكشف هذا المصطلح الآن", type="primary")
+    explore_clicked = st.button("🔍 استكشف هذا المصطلح الآن", type="primary", key="explore_term_btn")
 
     if explore_clicked:
         if not explore_query.strip():
@@ -2858,10 +1200,10 @@ with tab1:
     st.subheader("🎴 بطاقات التعلّم بنظام Leitner (تكرار متباعد)")
     st.caption("كل بطاقة تنتقل بين 5 صناديق حسب أدائك: كل إجابة صحيحة تدفعها صندوقاً للأمام، وكل خطأ يعيدها للصندوق الأول.")
 
-    upload = st.file_uploader("أو ارفع ملف CSV خاص بمصطلحاتك (أعمدة: term_ar, term_en, term_ru, category, definition_ar)", type=["csv"])
+    upload = st.file_uploader("أو ارفع ملف CSV خاص بمصطلحاتك (أعمدة: term_ar, term_en, term_ru, category, definition_ar)", type=["csv"], key="leitner_csv_upload")
     active_df = pd.read_csv(upload) if upload is not None else filtered_df.reset_index(drop=True)
 
-    review_mode = st.checkbox("🎯 وضع المراجعة الذكية (أولوية للبطاقات الأضعف)", value=True)
+    review_mode = st.checkbox("🎯 وضع المراجعة الذكية (أولوية للبطاقات الأضعف)", value=True, key="leitner_review_mode")
     if review_mode and upload is None:
         active_df = active_df.copy()
         active_df["_box"] = active_df["term_ar"].map(lambda t: st.session_state.leitner_boxes.get(t, 1))
@@ -2889,27 +1231,27 @@ with tab1:
 
         c1, c2, c3, c4, c5 = st.columns(5)
         with c1:
-            if st.button("⬅️ السابق"):
+            if st.button("⬅️ السابق", key="flash_prev_btn"):
                 st.session_state.flash_index -= 1
                 st.session_state.flash_flipped = False
                 st.rerun()
         with c2:
-            if st.button("🔄 قلب البطاقة"):
+            if st.button("🔄 قلب البطاقة", key="flash_flip_btn"):
                 st.session_state.flash_flipped = not st.session_state.flash_flipped
                 st.rerun()
         with c3:
-            if st.button("➡️ التالي"):
+            if st.button("➡️ التالي", key="flash_next_btn"):
                 st.session_state.flash_index += 1
                 st.session_state.flash_flipped = False
                 st.rerun()
         with c4:
-            if st.button("✅ أتقنتها"):
+            if st.button("✅ أتقنتها", key="flash_known_btn"):
                 st.session_state.leitner_boxes[term_key] = min(5, box_level + 1)
                 st.session_state.flash_index += 1
                 st.session_state.flash_flipped = False
                 st.rerun()
         with c5:
-            if st.button("❌ أحتاج مراجعة"):
+            if st.button("❌ أحتاج مراجعة", key="flash_unknown_btn"):
                 st.session_state.leitner_boxes[term_key] = 1
                 st.session_state.flash_index += 1
                 st.session_state.flash_flipped = False
@@ -2920,7 +1262,7 @@ with tab1:
     st.markdown("---")
     st.subheader("🧠 الاختبار الذاتي السريع (مصطلح ↔ ترجمة)")
 
-    if st.button("🎲 ابدأ سؤالاً عشوائياً"):
+    if st.button("🎲 ابدأ سؤالاً عشوائياً", key="quiz_random_btn"):
         st.session_state.quiz_row = glossary_df.sample(1).iloc[0]
         st.session_state.quiz_options = None
 
@@ -2933,7 +1275,7 @@ with tab1:
             random.shuffle(options)
             st.session_state.quiz_options = options
         choice = st.radio("اختر الإجابة:", st.session_state.quiz_options, key="quiz_choice")
-        if st.button("تحقق من الإجابة"):
+        if st.button("تحقق من الإجابة", key="quiz_check_btn"):
             st.session_state.quiz_total += 1
             box_level = st.session_state.leitner_boxes.get(qr["term_ar"], 1)
             if choice == qr["term_ru"]:
@@ -2949,7 +1291,7 @@ with tab1:
 # ============================================================================
 with tab2:
     studio_mode = st.radio(
-        "اختر القسم:", ["🌐 محاكي الترجمة (مع عداد الوقت)", "📰 نماذج المقالات السياسية للمراجعة"], horizontal=True
+        "اختر القسم:", ["🌐 محاكي الترجمة (مع عداد الوقت)", "📰 نماذج المقالات السياسية للمراجعة"], horizontal=True, key="studio_mode_radio"
     )
 
     if studio_mode == "🌐 محاكي الترجمة (مع عداد الوقت)":
@@ -2957,7 +1299,7 @@ with tab2:
         st.caption("اختر نصاً، فعّل عداد الوقت لمحاكاة ظروف الامتحان، ترجم النص، ثم قيّم أداءك بمحرك التقييم الذكي.")
 
         text_titles = texts_df["title_ar"].tolist()
-        selected_title = st.selectbox("اختر النص الدبلوماسي:", text_titles)
+        selected_title = st.selectbox("اختر النص الدبلوماسي:", text_titles, key="studio_text_select")
         text_row = texts_df[texts_df["title_ar"] == selected_title].iloc[0]
 
         lang_labels = {"ar": "العربية", "en": "الإنجليزية", "ru": "الروسية"}
@@ -2966,8 +1308,8 @@ with tab2:
 
         timer_col1, timer_col2 = st.columns([1, 2])
         with timer_col1:
-            exam_minutes = st.selectbox("⏱️ مدة محاكاة الامتحان (دقيقة)", [5, 10, 15, 20, 30], index=2)
-            start_timer = st.button("▶️ بدء العداد الزمني")
+            exam_minutes = st.selectbox("⏱️ مدة محاكاة الامتحان (دقيقة)", [5, 10, 15, 20, 30], index=2, key="studio_exam_minutes")
+            start_timer = st.button("▶️ بدء العداد الزمني", key="studio_start_timer_btn")
         with timer_col2:
             if start_timer:
                 st.session_state.exam_started = True
@@ -2977,7 +1319,7 @@ with tab2:
                 st.caption("اضغط 'بدء العداد الزمني' لمحاكاة ضغط وقت الامتحان الحقيقي.")
 
         st.markdown("##### 📄 النص المصدر")
-        st.text_area("النص الأصلي", value=text_row["source_text"], height=120, disabled=True, label_visibility="collapsed")
+        st.text_area("النص الأصلي", value=text_row["source_text"], height=120, disabled=True, label_visibility="collapsed", key="studio_source_text_area")
         source_word_count = len(text_row["source_text"].split())
         st.caption(f"عدد كلمات النص المصدر: {source_word_count}")
 
@@ -2993,9 +1335,9 @@ with tab2:
 
         col_a, col_b = st.columns([1, 1])
         with col_a:
-            evaluate_clicked = st.button("🔎 قيّم ترجمتي", type="primary")
+            evaluate_clicked = st.button("🔎 قيّم ترجمتي", type="primary", key="studio_evaluate_btn")
         with col_b:
-            show_model = st.checkbox("👁️ أظهر النموذج المرجعي")
+            show_model = st.checkbox("👁️ أظهر النموذج المرجعي", key="studio_show_model_chk")
 
         if show_model:
             st.markdown("##### 🏛️ النموذج المرجعي (احترافي)")
@@ -3052,8 +1394,8 @@ with tab2:
         if not st.session_state.api_key:
             st.info("🔑 أضف مفتاح Gemini API المجاني في الشريط الجانبي لتفعيل توليد مقالات جديدة عند الطلب.")
         else:
-            essay_topic = st.text_input("موضوع المقال", placeholder="مثال: تصاعد التوتر في مضيق هرمز، مستقبل العلاقات الروسية الأفريقية")
-            if st.button("✨ ولّد مقالاً جديداً"):
+            essay_topic = st.text_input("موضوع المقال", placeholder="مثال: تصاعد التوتر في مضيق هرمز، مستقبل العلاقات الروسية الأفريقية", key="essay_topic_input")
+            if st.button("✨ ولّد مقالاً جديداً", key="essay_generate_btn"):
                 if essay_topic.strip():
                     with st.spinner("جارٍ كتابة مقال تحليلي جديد..."):
                         generated_essay = generate_ai_essay(essay_topic.strip(), st.session_state.api_key)
@@ -3091,14 +1433,14 @@ with tab2:
 # ============================================================================
 with tab3:
     st.subheader("📝 بنك الأسئلة والاختبارات التفاعلية")
-    mode = st.radio("اختر نوع الاختبار:", ["اختيار من متعدد (MCQ)", "🎲 ولّد أسئلة جديدة بالذكاء الاصطناعي", "وضع الاختبار المحاكي بالوقت", "أسئلة مقالية (Essay)"])
+    mode = st.radio("اختر نوع الاختبار:", ["اختيار من متعدد (MCQ)", "🎲 ولّد أسئلة جديدة بالذكاء الاصطناعي", "وضع الاختبار المحاكي بالوقت", "أسئلة مقالية (Essay)"], key="quiz_mode_radio")
 
     if mode == "اختيار من متعدد (MCQ)":
         col_cat, col_diff = st.columns(2)
         with col_cat:
-            cat_filter = st.selectbox("تصفية حسب الفئة", ["الكل"] + sorted(mcq_df["category"].unique().tolist()))
+            cat_filter = st.selectbox("تصفية حسب الفئة", ["الكل"] + sorted(mcq_df["category"].unique().tolist()), key="mcq_category_filter")
         with col_diff:
-            diff_filter = st.selectbox("تصفية حسب الصعوبة", ["الكل"] + sorted(mcq_df["difficulty"].unique().tolist()))
+            diff_filter = st.selectbox("تصفية حسب الصعوبة", ["الكل"] + sorted(mcq_df["difficulty"].unique().tolist()), key="mcq_difficulty_filter")
 
         display_mcq = mcq_df.copy()
         if cat_filter != "الكل":
@@ -3117,7 +1459,7 @@ with tab3:
                                    key=f"mcq_{q['id']}", label_visibility="visible")
                 answers[q["id"]] = choice
                 st.markdown("---")
-            submitted = st.form_submit_button("📤 تسليم الاختبار", type="primary")
+            submitted = st.form_submit_button("📤 تسليم الاختبار", type="primary", key="mcq_submit_btn")
 
         if submitted and len(display_mcq) > 0:
             correct = sum(1 for _, q in display_mcq.iterrows() if answers[q["id"]] == q["correct_answer"])
@@ -3139,11 +1481,11 @@ with tab3:
         else:
             gen_col1, gen_col2 = st.columns([3, 1])
             with gen_col1:
-                gen_topic = st.text_input("الموضوع", placeholder="مثال: العقوبات على روسيا، الأمن السيبراني الدولي، منظمة بريكس")
+                gen_topic = st.text_input("الموضوع", placeholder="مثال: العقوبات على روسيا، الأمن السيبراني الدولي، منظمة بريكس", key="gen_topic_input")
             with gen_col2:
-                gen_count = st.selectbox("عدد الأسئلة", [3, 4, 5, 6], index=1)
+                gen_count = st.selectbox("عدد الأسئلة", [3, 4, 5, 6], index=1, key="gen_count_select")
 
-            if st.button("✨ ولّد الأسئلة الآن", type="primary"):
+            if st.button("✨ ولّد الأسئلة الآن", type="primary", key="gen_questions_btn"):
                 if gen_topic.strip():
                     with st.spinner("جارٍ توليد أسئلة جديدة حصرياً حول هذا الموضوع..."):
                         st.session_state.generated_questions = generate_ai_questions(gen_topic.strip(), st.session_state.api_key, n=gen_count)
@@ -3164,7 +1506,7 @@ with tab3:
                                            key=f"gen_q_{i}", label_visibility="visible")
                             st.session_state.generated_answers[i] = sel
                             st.markdown("---")
-                        gen_submit = st.form_submit_button("📤 تسليم", type="primary")
+                        gen_submit = st.form_submit_button("📤 تسليم", type="primary", key="gen_submit_btn")
 
                     if gen_submit:
                         correct_count = sum(1 for i, q in enumerate(gq) if st.session_state.generated_answers.get(i) == q.get("correct"))
@@ -3183,7 +1525,7 @@ with tab3:
         exam_time_col1, exam_time_col2 = st.columns([1, 2])
         with exam_time_col1:
             timed_minutes = st.selectbox("مدة الاختبار (دقيقة)", [5, 10, 15, 20], index=1, key="timed_exam_minutes")
-            start_timed_exam = st.button("▶️ ابدأ الاختبار المحاكي")
+            start_timed_exam = st.button("▶️ ابدأ الاختبار المحاكي", key="timed_exam_start_btn")
         with exam_time_col2:
             if start_timed_exam:
                 st.session_state.timed_exam_active = True
@@ -3204,7 +1546,7 @@ with tab3:
                                        key=f"timed_{q['id']}", label_visibility="visible")
                     timed_answers[q["id"]] = choice
                     st.markdown("---")
-                timed_submit = st.form_submit_button("📤 تسليم الاختبار المحاكي", type="primary")
+                timed_submit = st.form_submit_button("📤 تسليم الاختبار المحاكي", type="primary", key="timed_exam_submit_btn")
 
             if timed_submit:
                 correct = sum(1 for _, q in st.session_state.timed_exam_questions.iterrows() if timed_answers[q["id"]] == q["correct_answer"])
@@ -3234,9 +1576,9 @@ with tab4:
 
     tcol1, tcol2 = st.columns(2)
     with tcol1:
-        treaty_type_filter = st.selectbox("نوع الكيان", ["الكل"] + sorted(treaties_df["category"].unique().tolist()))
+        treaty_type_filter = st.selectbox("نوع الكيان", ["الكل"] + sorted(treaties_df["category"].unique().tolist()), key="treaty_type_filter")
     with tcol2:
-        treaty_search = st.text_input("🔍 بحث في المعاهدات والمنظمات")
+        treaty_search = st.text_input("🔍 بحث في المعاهدات والمنظمات", key="treaty_search_input")
 
     filtered_treaties = treaties_df.copy()
     if treaty_type_filter != "الكل":
@@ -3272,8 +1614,8 @@ with tab4:
     if not st.session_state.api_key:
         st.info("🔑 أضف مفتاح Gemini API المجاني في الشريط الجانبي لتفعيل هذه الميزة.")
     else:
-        new_treaty_name = st.text_input("اسم المعاهدة أو المنظمة", placeholder="مثال: معاهدة أستانا، منظمة الدول الأمريكية، اتفاقية سيفر")
-        if st.button("✨ ولّد بطاقة معلومات"):
+        new_treaty_name = st.text_input("اسم المعاهدة أو المنظمة", placeholder="مثال: معاهدة أستانا، منظمة الدول الأمريكية، اتفاقية سيفر", key="new_treaty_name_input")
+        if st.button("✨ ولّد بطاقة معلومات", key="new_treaty_generate_btn"):
             if new_treaty_name.strip():
                 with st.spinner("جارٍ توليد بطاقة المعلومات..."):
                     card_data = generate_ai_treaty_card(new_treaty_name.strip(), st.session_state.api_key)
@@ -3309,9 +1651,10 @@ with tab5:
     selected_sources = st.multiselect(
         "اختر مصدراً واحداً أو أكثر:", list(NEWS_SOURCES.keys()),
         default=["🕊️ مصراوي — شؤون عربية ودولية (دبلوماسي)", "🏛️ اليوم السابع — سياسة"],
+        key="news_sources_multiselect",
     )
-    news_limit = st.slider("عدد الأخبار من كل مصدر", 2, 8, 4)
-    refresh_news = st.button("🔄 تحديث الأخبار الآن")
+    news_limit = st.slider("عدد الأخبار من كل مصدر", 2, 8, 4, key="news_limit_slider")
+    refresh_news = st.button("🔄 تحديث الأخبار الآن", key="news_refresh_btn")
 
     if not selected_sources:
         st.warning("يرجى اختيار مصدر واحد على الأقل.")
